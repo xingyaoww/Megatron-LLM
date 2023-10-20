@@ -72,6 +72,12 @@ class Encoder(object):
             doc_ids = []
             for sentence in Encoder.splitter.tokenize(text):
                 sentence_ids = Encoder.tokenizer.tokenize(sentence)
+
+                if self.args.add_bos_token:
+                    sentence_ids = [Encoder.tokenizer.bos] + sentence_ids
+                if self.args.add_eos_token:
+                    sentence_ids = sentence_ids + [Encoder.tokenizer.eos]
+                
                 if len(sentence_ids) > 0:
                     doc_ids.append(sentence_ids)
             if len(doc_ids) > 0 and self.args.append_eod:
@@ -122,6 +128,8 @@ def get_args():
     group.add_argument("--no_new_tokens", action="store_false", dest="new_tokens",
                        help=("Whether to add special tokens (e.g. CLS, MASK, etc) "
                              "in the sentenciepiece tokenizer or not"))
+    group.add_argument('--add_bos_token', action='store_true')
+    group.add_argument('--add_eos_token', action='store_true')
     args = parser.parse_args()
     args.keep_empty = False
 
@@ -151,7 +159,8 @@ def main():
     tokenizer = build_tokenizer(args)
     pool = multiprocessing.Pool(args.workers, initializer=encoder.initializer)
     encoded_docs = pool.imap(encoder.encode, fin, args.chunk_size)
-    #encoded_docs = map(encoder.encode, fin)
+    # encoder.initializer()
+    # encoded_docs = map(encoder.encode, fin)
 
     level = "document"
     if args.split_sentences:
