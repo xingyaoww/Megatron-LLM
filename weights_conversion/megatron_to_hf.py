@@ -77,11 +77,14 @@ def convert_ffn(llama_mega, layer_idx=0, n_dense=11008):
     return ffn_w1, ffn_w3
 
 
-def write_llama_model(model_path,
-                input_base_path,
-                num_output_shards: int=2,
-                norm_eps: float=1e-05,
-                rope_theta: float=1e4):
+def write_llama_model(
+    model_path,
+    input_base_path,
+    num_output_shards: int=2,
+    norm_eps: float=1e-05,
+    rope_theta: float=1e4,
+    vocab_size: int=None,
+):
 
     # Preliminaries
     print(f"Fetching all parameters from the checkpoint at {input_base_path}.")
@@ -167,6 +170,7 @@ def write_llama_model(model_path,
         # Write configs and save
         index_dict["metadata"] = {"total_size": param_count * 2}
         write_json(index_dict, os.path.join(tmp_model_path, "pytorch_model.bin.index.json"))
+
         config = LlamaConfig(
             vocab_size=args.padded_vocab_size,
             hidden_size=n_hidden,
@@ -184,8 +188,21 @@ def write_llama_model(model_path,
         del loaded
         gc.collect()
 
+        if vocab_size is None:
+            vocab_size = args.padded_vocab_size
+        else:
+            print(f"Using vocab size {vocab_size} from tokenizer and not {args.padded_vocab_size} from args.")
+            # update config
+            config.vocab_size = vocab_size
+
         print("Loading the checkpoint in a Llama model...")
-        model = LlamaForCausalLM.from_pretrained(tmp_model_path, torch_dtype=torch_dtype)
+        model = LlamaForCausalLM.from_pretrained(
+            tmp_model_path,
+            torch_dtype=torch_dtype
+        )
+        model.config.vocab_size = vocab_size
+        # resizes the embedding layer to the correct size
+        model.resize_token_embeddings(vocab_size)
         # Avoid saving this as part of the config.
         del model.config._name_or_path
 
@@ -430,7 +447,7 @@ def write_tokenizer(args: Namespace):
     print("Final HF Tokenizer configuration:")
     print(hf_tokenizer)
     hf_tokenizer.save_pretrained(args.output_dir)
-
+    return len(hf_tokenizer)
 
 def main():
     # make sure megatron is importable
@@ -456,6 +473,7 @@ def main():
                              "in the sentenciepiece tokenizer"))
     
     args = parser.parse_args()
+    vocab_size = write_tokenizer(args)
     if args.model in {"llama", "llama2", "codellama"}:
         eps = 1e-6 if args.model == "llama" else 1e-5
         rope_theta = 1e6 if args.model == "codellama" else 1e4
@@ -465,6 +483,7 @@ def main():
             num_output_shards=args.num_output_shards,
             norm_eps=eps,
             rope_theta=rope_theta,
+            vocab_size=vocab_size,
         )
     elif args.model == "falcon":
         write_falcon_model(
@@ -473,7 +492,6 @@ def main():
             num_output_shards=args.num_output_shards,
             safe_serialization=True,
         )
-    write_tokenizer(args)
 
 if __name__ == "__main__":
     main()
