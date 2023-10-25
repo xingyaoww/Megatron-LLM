@@ -44,11 +44,12 @@ class Encoder(object):
         # get data
         assert Encoder.tokenizer is not None
         data = json.loads(line)
-
+        _id = data["id"]
+        conversations = data["conversations"]
         # tokenize and get roles
         tokens = []
         roles = []
-        for turn in data:
+        for turn in conversations:
             role = turn["role"]
             message = format_message(turn["content"], role)
             message = Encoder.tokenizer.tokenize(message)
