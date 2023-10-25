@@ -44,29 +44,16 @@ class Encoder(object):
         # get data
         assert Encoder.tokenizer is not None
         data = json.loads(line)
-        question = data[self.args.question_key]
-        answer = data[self.args.answer_key]
-        system = None if self.args.system_key is None else data[self.args.system_key]
-
-        # now format messages
-        if system is not None:
-            system = format_message(system, "system")
-        question = format_message(question, "question")
-        answer = format_message(answer, "answer")
 
         # tokenize and get roles
         tokens = []
         roles = []
-        if system is not None:
-            system = Encoder.tokenizer.tokenize(system)
-            tokens += system
-            roles += [Role.system.value]*len(system)
-        question = Encoder.tokenizer.tokenize(question)
-        tokens += question
-        roles += [Role.prompter.value]*len(question)
-        answer = Encoder.tokenizer.tokenize(answer)
-        tokens += answer
-        roles += [Role.assistant.value]*len(answer)
+        for turn in data:
+            role = turn["role"]
+            message = format_message(turn["content"], role)
+            message = Encoder.tokenizer.tokenize(message)
+            tokens += message
+            roles += [Role[role].value]*len(message)
         return len(line), tokens, roles
 
     @property
@@ -105,12 +92,6 @@ def get_args():
     group = parser.add_argument_group(title='input data')
     group.add_argument('--input', type=str, nargs="+",
                        help='Path(s) to input JSON file(s)')
-    group.add_argument('--system_key',
-                       help='key to extract system info from json (optional)')
-    group.add_argument('--question_key', default='input',
-                       help='key to extract questions from json')
-    group.add_argument('--answer_key', default='output',
-                       help='key to extract answers from json')
 
     group = parser.add_argument_group(title='tokenizer')
     group.add_argument('--tokenizer_type', type=str, required=True,

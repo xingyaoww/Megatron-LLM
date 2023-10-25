@@ -19,7 +19,7 @@ from megatron.data.dataset_utils import (
 
 class Role(IntEnum):
     system = 0
-    prompter = 1
+    user = 1
     assistant = 2
 
 
