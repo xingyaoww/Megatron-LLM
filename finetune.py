@@ -62,38 +62,59 @@ def model_provider(pre_process: bool = True, post_process: bool = True):
 ##
 
 # Heavily inspired by Andreas Köpf: https://github.com/andreaskoepf/epfl-megatron/tree/local_changes/
-def get_attention_mask_and_position_ids(data, attention_mask):
-    """Build causal attention masks and position id for left to right model.
-    Builds a (batch, 1, seq, seq)-sized binary causal attention mask from
-    a (batch, seq)-sized attention mask specifying.
-    If any value in the input attention_mask is < 0.5, the output
-    attention mask will mask this position for every token, i.e. out[i, 0, :, j] = True
-    if in[i, j] < 0.5.
-    Returns attention_mask, position_ids"""
+def get_attention_mask_and_position_ids(data, attention_mask, example_ids):
+    """
+    Constructs causal attention masks and position IDs for sequences, based on provided example IDs.
+
+    The function creates a causal attention mask to ensure each token in a sequence only attends 
+    to previous tokens and itself. When sequences are packed, the attention mask also ensures 
+    that tokens from one sequence do not attend to tokens from a subsequent packed sequence. 
+
+    Additionally, position IDs are generated such that they reset for each new example in the packed sequences.
+
+    Args:
+    - data (torch.Tensor): Input data tensor of shape (batch_size, seq_length).
+    - attention_mask (torch.Tensor): Initial attention mask of shape (batch_size, seq_length) where
+                                     values close to 1 indicate tokens and values close to 0 indicate padding.
+    - example_ids (torch.Tensor): Tensor of shape (batch_size, seq_length) indicating the IDs of packed examples.
+
+    Returns:
+    - attention_mask (torch.Tensor): Updated binary attention mask of shape (batch_size, 1, seq_length, seq_length).
+    - position_ids (torch.Tensor): Position IDs tensor of shape (batch_size, seq_length) where IDs reset for each 
+                                   new example in the packed sequences.
+    """
 
     # Extract batch size and sequence length.
     micro_batch_size, seq_length = data.size()
 
-    # Attention mask (lower triangular).
-    att_mask_batch = micro_batch_size
-    attention_mask = (
-        attention_mask.unsqueeze(1)
-        .expand(micro_batch_size, seq_length, seq_length)
-        .to(data.device)
-    )
-    attention_mask = torch.tril(attention_mask).view(
-        att_mask_batch, 1, seq_length, seq_length
-    )
+    # Expand example_ids for comparison
+    expanded_example_ids = example_ids.unsqueeze(2).expand(micro_batch_size, seq_length, seq_length)
+    
+    # Create a comparison mask where each position is compared to every other position in the sequence
+    comparison_mask = (expanded_example_ids == expanded_example_ids.transpose(1, 2)).float()
+
+    # Attention mask based on example_ids
+    causal_mask = torch.tril(comparison_mask).float()
+    
+    # Merge the two masks
+    merged_mask = attention_mask.unsqueeze(2) * causal_mask
 
     # Convert attention mask to binary, True entries will masked
-    attention_mask = attention_mask < 0.5
+    attention_mask = (merged_mask < 0.5).to(data.device)
 
-    # Position ids.
-    position_ids = torch.arange(seq_length, dtype=torch.long, device=data.device)
-    position_ids = position_ids.unsqueeze(0).expand_as(data)
+    # Position ids. reset for each new example
+    position_ids = torch.zeros_like(data, dtype=torch.long)
+    for i in range(micro_batch_size):
+        pos = 0
+        for j in range(seq_length):
+            position_ids[i, j] = pos
+            pos += 1
+            # Check if this token is the last one in an example
+            if j < seq_length - 1 and example_ids[i, j] != example_ids[i, j+1]:
+                pos = 0  # reset
+    position_ids.to(data.device)
 
     return attention_mask, position_ids
-
 
 def get_batch(data_iterator):
     """Generate a batch"""
@@ -101,11 +122,12 @@ def get_batch(data_iterator):
     tokenizer = get_tokenizer()
 
     # Items and their type.
-    datatype = torch.int64
     if args.data_type == "gpt":
         keys = ["text"]
+        float_keys = []
     elif args.data_type == "instruction":
-        keys = ["text", "attention_mask", "assistant_mask", "pad_mask"]
+        keys = ["text", "attention_mask", "example_ids"]
+        float_keys = ["loss_mask"]
     else:
         raise KeyError(f"Unknown dataset type {args.data_type}")
 
@@ -114,7 +136,11 @@ def get_batch(data_iterator):
         data = next(data_iterator)
     else:
         data = None
-    data_b = tensor_parallel.broadcast_data(keys, data, datatype)
+    data_b = tensor_parallel.broadcast_data(keys, data, torch.int64)
+    data_b_float = tensor_parallel.broadcast_data(float_keys, data, torch.float32)
+    for key in float_keys:
+        data_b[key] = data_b_float[key]
+    del data_b_float
 
     # Unpack.
     tokens = data_b["text"]
@@ -148,15 +174,11 @@ def get_batch(data_iterator):
     # Instruction dataset.
     # Heavily inspired by Andreas Köpf: https://github.com/andreaskoepf/epfl-megatron/tree/local_changes/
     attention_mask = data_b["attention_mask"][:, :-1]
-    assistant_mask = data_b["assistant_mask"][:, 1:].to(tokens.device)
-    pad_mask = data_b["pad_mask"][:, 1:].to(tokens.device)
-    loss_mask = torch.full(labels.size(), args.scalar_loss_mask, dtype=torch.float,
-                           device=tokens.device)
-    loss_mask[assistant_mask == 1] = 1.0
-    loss_mask[pad_mask == 1] = 0.0
+    example_ids = data_b["example_ids"][:, :-1]
     attention_mask, position_ids = get_attention_mask_and_position_ids(
-        tokens, attention_mask
+        tokens, attention_mask, example_ids
     )
+    loss_mask = data_b["loss_mask"][:, 1:].to(tokens.device)
 
     return tokens, labels, loss_mask, attention_mask, position_ids
 
@@ -257,7 +279,7 @@ if __name__ == "__main__":
     if args.data_type == "gpt":
         collate_fn = None
     else:
-        collate_fn = instruction_collator
+        collate_fn = partial(instruction_collator, scalar_loss_mask=args.scalar_loss_mask)
 
 
     pretrain(args, data_provider, model_provider,  ModelType.encoder_or_decoder,

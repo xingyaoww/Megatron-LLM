@@ -319,7 +319,7 @@ def round_to_multiple_of(x: int, y: int) -> int:
         return ((x + y - 1) // y) * y
 
 
-def instruction_collator(data):
+def instruction_collator(data, scalar_loss_mask=0.0):
     args = get_args()
     tokenizer = get_tokenizer()
     pad_id = tokenizer.pad
@@ -336,6 +336,11 @@ def instruction_collator(data):
     role = torch.full_like(attention_mask, -1)
     input = torch.full_like(attention_mask, pad_id)
 
+    # For loss and example segmentation
+    # 1 means optimize loss, 0 means no loss
+    loss_mask = torch.full_like(attention_mask, scalar_loss_mask, dtype=torch.float)
+    # example id for each token, used for packed sequences
+    example_ids = torch.zeros_like(attention_mask)
 
     for i, x in enumerate(data):
         t = x["text"]
@@ -350,7 +355,22 @@ def instruction_collator(data):
             input[i] = torch.from_numpy(t[:seq_len])
             role[i] = torch.from_numpy(r[:seq_len])
 
-    assistant_mask = (role == Role.assistant.value).long()
-    pad_mask = (input == pad_id).long()
-    return {"text": input, "attention_mask": attention_mask,
-            "assistant_mask": assistant_mask, "pad_mask": pad_mask}
+        # Segmentation for packed sequences
+        current_example_id = 0
+        for j in range(seq_len):
+            if role[i, j] == Role.PACK_SEP.value:
+                current_example_id += 1
+            example_ids[i, j] = current_example_id
+
+    # Loss mask
+    # - only calculate loss for assistant tokens
+    loss_mask[role == Role.assistant.value] = 1.0
+    # - completely ignore padding tokens
+    loss_mask[input == pad_id] = 0.0
+
+    return {
+        "text": input,
+        "attention_mask": attention_mask,
+        "loss_mask": loss_mask,
+        "example_ids": example_ids,
+    }
