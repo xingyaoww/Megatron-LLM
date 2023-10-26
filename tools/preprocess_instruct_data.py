@@ -125,8 +125,15 @@ def get_args():
     group.add_argument("--no_new_tokens", action="store_false", dest="new_tokens",
                        help=("Whether to add special tokens (e.g. CLS, MASK, etc) "
                              "in the sentencepiece tokenizer or not"))
+    group.add_argument("--do_packing", action="store_true",
+                       help=("Whether to pack documents into sequences of max_seq_length."))
+    group.add_argument("--max_seq_length", type=int, default=4096)
     args = parser.parse_args()
     args.keep_empty = False
+
+    if args.do_packing:
+        assert args.max_seq_length, "Must specify max_seq_length when packing documents."
+        print(f"Packing documents into sequences of max_seq_length {args.max_seq_length}.")
 
     if args.tokenizer_type.lower().startswith('bert'):
         if not args.split_sentences:
@@ -138,13 +145,51 @@ def get_args():
     args.tensor_model_parallel_size = 1
     return args
 
+def pack_docs(docs, tokenizer, max_seq_length):
+    packed_docs = []
+
+    current_pack_tokens = []
+    current_pack_roles = []
+    current_seq_length = 0
+    current_size = 0
+
+    for size, tokens, roles in docs:
+        # Check if adding the current text (with separator) will exceed max_seq_length
+        if current_seq_length + len(tokens) + 1 <= max_seq_length:
+            if current_pack_tokens:  # not the first sentence in pack
+                current_pack_tokens.append(tokenizer.bos)
+                current_pack_roles.append(Role.PACK_SEP.value)
+                current_seq_length += 1
+                current_size += len(tokenizer._inv_special_tokens[tokenizer.bos])
+
+            current_pack_tokens.extend(tokens)
+            current_pack_roles.extend(roles)
+            current_seq_length += len(tokens)
+            current_size += size
+        else:
+            # Finish the current pack and start a new one
+            packed_docs.append((current_size, current_pack_tokens, current_pack_roles))
+
+            current_pack_tokens = tokens
+            current_pack_roles = roles
+            current_seq_length = len(tokens)
+            current_size = size
+
+    # Add any remaining packed sequences
+    if current_pack_tokens:
+        packed_docs.append((current_size, current_pack_tokens, current_pack_roles))
+    
+    print(f"Packed {len(docs)} documents into {len(packed_docs)} documents.")
+    return packed_docs
+
 
 def main():
     args = get_args()
     startup_start = time.time()
 
     encoder = Encoder(args)
-    vocab_size = build_tokenizer(args).vocab_size
+    tokenizer = build_tokenizer(args)
+    vocab_size = tokenizer.vocab_size
     fs = map(open, args.input)
     with Pool(args.workers, initializer=encoder.initializer) as pool, \
             DatasetWriter(args.output_prefix, vocab_size, args.dataset_impl,
@@ -154,6 +199,13 @@ def main():
 
         f = itertools.chain(*fs)
         docs = pool.imap(encoder.encode, f, args.chunk_size)
+
+        if args.do_packing:
+            # make sure it works when docs is a generator
+            print(f"Sorting loaded documents by length for efficient packing. This can be slow for large dataset.")
+            docs = sorted(docs, key=lambda x: len(x[1]), reverse=True)
+            docs = pack_docs(docs, tokenizer, args.max_seq_length)
+
         startup_end = time.time()
         proc_start = time.time()
         total_bytes_processed = 0
