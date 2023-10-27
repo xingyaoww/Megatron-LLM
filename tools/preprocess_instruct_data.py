@@ -166,8 +166,18 @@ def pack_docs(docs, tokenizer, max_seq_length):
             current_pack_roles.extend(roles)
             current_seq_length += len(tokens)
             current_size += size
+        elif current_seq_length == 0:
+            # The only possible reason for this is len(tokens) >= max_seq_length 
+            assert len(current_pack_tokens) == len(current_pack_roles) == 0
+            assert len(tokens) >= max_seq_length
+            assert len(tokens) == len(roles)
+            # We truncate the tokens to max_seq_length AND treat it as a single pack
+            packed_docs.append((size, tokens[:max_seq_length], roles[:max_seq_length]))
         else:
             # Finish the current pack and start a new one
+            assert len(current_pack_tokens) > 0
+            assert len(current_pack_roles) > 0
+            assert current_size > 0
             packed_docs.append((current_size, current_pack_tokens, current_pack_roles))
 
             current_pack_tokens = tokens
@@ -177,6 +187,7 @@ def pack_docs(docs, tokenizer, max_seq_length):
 
     # Add any remaining packed sequences
     if current_pack_tokens:
+        assert len(current_pack_tokens) > 0, "Should not have empty pack."
         packed_docs.append((current_size, current_pack_tokens, current_pack_roles))
     
     print(f"Packed {len(docs)} documents into {len(packed_docs)} documents.")
@@ -213,6 +224,13 @@ def main():
 
         for i, (size, tokens, roles) in enumerate(docs, start=1):
             total_bytes_processed += size
+            if len(tokens) == 0:
+                print("WARNING: Encountered empty document, skipping.")
+                exit(1)
+            assert size > 0
+            assert len(tokens) == len(roles)
+            assert len(tokens) > 0
+
             token_writer.add_item(tokens)
             role_writer.add_item(roles)
 
