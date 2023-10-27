@@ -129,7 +129,8 @@ def main():
                     help='Specify which checkpoint to load. If not '
                         'specified, the latest checkpoint (highest iteration '
                         'number) located in the load directory will be used.')
-
+    parser.add_argument('--use_distributed_optimizer', action='store_true',
+                       help='Use distributed optimizer.')
     known_args, _ = parser.parse_known_args()
     loader = load_plugin('loader', known_args.loader)
     saver = load_plugin('saver', known_args.saver)

@@ -479,6 +479,7 @@ def _load_base_checkpoint(load_dir, no_load_optim, use_distributed_optimizer, ra
     # Load the checkpoint.
     try:
         model_state_dict = torch.load(model_checkpoint_name, map_location='cpu')
+        print_rank_0(f"loaded model checkpoint from {model_checkpoint_name}")
         if use_distributed_optimizer:
             optim_state_dict = torch.load(optim_checkpoint_name, map_location='cpu')
         else:

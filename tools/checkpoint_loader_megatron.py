@@ -57,6 +57,9 @@ def _load_checkpoint(queue, args):
     if args.bf16:
         sys.argv += ["--bf16"]
 
+    if args.use_distributed_optimizer:
+        sys.argv += ["--use_distributed_optimizer"]
+
     margs = megatron.arguments.parse_args()
 
     if args.load_iters is not None:
