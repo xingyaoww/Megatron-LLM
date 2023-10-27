@@ -319,6 +319,61 @@ def round_to_multiple_of(x: int, y: int) -> int:
         return ((x + y - 1) // y) * y
 
 
+# Heavily inspired by Andreas Köpf: https://github.com/andreaskoepf/epfl-megatron/tree/local_changes/
+def get_attention_mask_and_position_ids(data, attention_mask, example_ids):
+    """
+    Constructs causal attention masks and position IDs for sequences, based on provided example IDs.
+
+    The function creates a causal attention mask to ensure each token in a sequence only attends 
+    to previous tokens and itself. When sequences are packed, the attention mask also ensures 
+    that tokens from one sequence do not attend to tokens from a subsequent packed sequence. 
+
+    Additionally, position IDs are generated such that they reset for each new example in the packed sequences.
+
+    Args:
+    - data (torch.Tensor): Input data tensor of shape (batch_size, seq_length).
+    - attention_mask (torch.Tensor): Initial attention mask of shape (batch_size, seq_length) where
+                                     values close to 1 indicate tokens and values close to 0 indicate padding.
+    - example_ids (torch.Tensor): Tensor of shape (batch_size, seq_length) indicating the IDs of packed examples.
+
+    Returns:
+    - attention_mask (torch.Tensor): Updated binary attention mask of shape (batch_size, 1, seq_length, seq_length).
+    - position_ids (torch.Tensor): Position IDs tensor of shape (batch_size, seq_length) where IDs reset for each 
+                                   new example in the packed sequences.
+    """
+
+    # Extract batch size and sequence length.
+    micro_batch_size, seq_length = data.size()
+
+    # Expand example_ids for comparison
+    expanded_example_ids = example_ids.unsqueeze(2).expand(micro_batch_size, seq_length, seq_length)
+    
+    # Create a comparison mask where each position is compared to every other position in the sequence
+    comparison_mask = (expanded_example_ids == expanded_example_ids.transpose(1, 2)).float()
+
+    # Attention mask based on example_ids
+    causal_mask = torch.tril(comparison_mask).float()
+    
+    # Merge the two masks
+    merged_mask = attention_mask.unsqueeze(2) * causal_mask
+
+    # Convert attention mask to binary, True entries will masked
+    attention_mask = (merged_mask < 0.5).to(data.device)
+
+    # Position ids. reset for each new example
+    position_ids = torch.zeros_like(data, dtype=torch.long)
+    for i in range(micro_batch_size):
+        pos = 0
+        for j in range(seq_length):
+            position_ids[i, j] = pos
+            pos += 1
+            # Check if this token is the last one in an example
+            if j < seq_length - 1 and example_ids[i, j] != example_ids[i, j+1]:
+                pos = 0  # reset
+    position_ids.to(data.device)
+
+    return attention_mask, position_ids
+
 def instruction_collator(data, scalar_loss_mask=0.0):
     args = get_args()
     tokenizer = get_tokenizer()
@@ -368,9 +423,22 @@ def instruction_collator(data, scalar_loss_mask=0.0):
     # - completely ignore padding tokens
     loss_mask[input == pad_id] = 0.0
 
+    # -- Previous handled by get_batch
+    # Shift input to the right by one
+    tokens = input[:, :-1].contiguous()
+    attention_mask = attention_mask[:, :-1]
+    example_ids = example_ids[:, :-1]
+    attention_mask, position_ids = get_attention_mask_and_position_ids(
+        tokens, attention_mask, example_ids
+    )
+    # convert to torch.int64
+    attention_mask = attention_mask.to(torch.int64)
+    loss_mask = loss_mask[:, :-1]
+    
     return {
         "text": input,
         "attention_mask": attention_mask,
         "loss_mask": loss_mask,
-        "example_ids": example_ids,
+        # "example_ids": example_ids
+        "position_ids": position_ids,
     }
