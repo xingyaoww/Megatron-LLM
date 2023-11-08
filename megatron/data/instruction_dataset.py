@@ -430,11 +430,14 @@ def instruction_collator(
 
             example_ids[i, j] = current_example_id
             cur_count += 1
-        
+
         # Check if j is the last token in the sequence
         # If so, subtract 1 from the current example's count
         if j == seq_len - 1:
             attention_mask_in_length[i, current_example_id] = cur_count - 1
+        # Handle the case where the last token is not a PACK_SEP token
+        else:
+            attention_mask_in_length[i, current_example_id] = cur_count
 
     # Loss mask
     # - only calculate loss for assistant tokens
