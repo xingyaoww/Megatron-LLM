@@ -227,7 +227,12 @@ if __name__ == "__main__":
     if args.data_type == "gpt":
         collate_fn = None
     else:
-        collate_fn = partial(instruction_collator, scalar_loss_mask=args.scalar_loss_mask)
+        print_rank_0("Instruction collator will return attention_mask_in_length due to both packed input and flash attn usage.")
+        collate_fn = partial(
+            instruction_collator,
+            scalar_loss_mask=args.scalar_loss_mask,
+            return_attention_mask_in_length=args.packed_input and args.use_flash_attn
+        )
 
 
     pretrain(args, data_provider, model_provider,  ModelType.encoder_or_decoder,
