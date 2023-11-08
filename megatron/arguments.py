@@ -981,6 +981,13 @@ def _add_data_args(parser):
                        'end-of-document token.')
     group.add_argument('--eod_mask_loss', action='store_true',
                        help='Mask loss for the end of document tokens.')
+    group.add_argument('--packed_input', action='store_true',
+                       help=(
+                        'Input sequence is packed (with custom attention mask). '
+                        'This is mainly needed for FlashAttn since it does not '
+                        'use the custom attention mask by default.'
+                        )
+                       )
     return parser
 
 

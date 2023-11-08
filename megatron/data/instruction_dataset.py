@@ -374,7 +374,11 @@ def get_attention_mask_and_position_ids(data, attention_mask, example_ids):
 
     return attention_mask, position_ids
 
-def instruction_collator(data, scalar_loss_mask=0.0):
+def instruction_collator(
+    data,
+    scalar_loss_mask=0.0,
+    return_attention_mask_in_length: bool = False
+):
     args = get_args()
     tokenizer = get_tokenizer()
     pad_id = tokenizer.pad
@@ -397,6 +401,8 @@ def instruction_collator(data, scalar_loss_mask=0.0):
     # example id for each token, used for packed sequences
     example_ids = torch.zeros_like(attention_mask)
 
+    attention_mask_in_length = torch.zeros((batch_size, seq_len), dtype=torch.long)
+
     for i, x in enumerate(data):
         t = x["text"]
         r = x["role"]
@@ -412,10 +418,23 @@ def instruction_collator(data, scalar_loss_mask=0.0):
 
         # Segmentation for packed sequences
         current_example_id = 0
-        for j in range(seq_len):
+        cur_count = 0
+        for j in range(min(l, seq_len)):
+            # Switch to a new example if we encounter a PACK_SEP token
             if role[i, j] == Role.PACK_SEP.value:
+                # Add the count of tokens in the previous example
+                attention_mask_in_length[i, current_example_id] = cur_count
+                # Switch to the next example
                 current_example_id += 1
+                cur_count = 0 # reset
+
             example_ids[i, j] = current_example_id
+            cur_count += 1
+        
+        # Check if j is the last token in the sequence
+        # If so, subtract 1 from the current example's count
+        if j == seq_len - 1:
+            attention_mask_in_length[i, current_example_id] = cur_count - 1
 
     # Loss mask
     # - only calculate loss for assistant tokens
@@ -427,6 +446,8 @@ def instruction_collator(data, scalar_loss_mask=0.0):
     # Shift input to the right by one
     tokens = input[:, :-1].contiguous()
     attention_mask = attention_mask[:, :-1]
+    assert torch.all(attention_mask_in_length[:, -1] == 0)
+    attention_mask_in_length = attention_mask_in_length[:, :-1]
     example_ids = example_ids[:, :-1]
     attention_mask, position_ids = get_attention_mask_and_position_ids(
         tokens, attention_mask, example_ids
@@ -437,8 +458,8 @@ def instruction_collator(data, scalar_loss_mask=0.0):
     
     return {
         "text": input,
-        "attention_mask": attention_mask,
+        "attention_mask": attention_mask if not return_attention_mask_in_length \
+            else attention_mask_in_length,
         "loss_mask": loss_mask,
-        # "example_ids": example_ids
         "position_ids": position_ids,
     }

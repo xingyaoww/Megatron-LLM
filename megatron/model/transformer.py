@@ -23,7 +23,7 @@ from megatron.model.utils import attention_mask_func, erf_gelu
 # Extracted from: https://github.com/bigscience-workshop/Megatron-DeepSpeed
 from .glu_activations import GLU_ACTIVATIONS
 from megatron.model.positional_embeddings import precompute_freqs_cis, apply_rotary_emb
-
+from flash_attn.bert_padding import pad_input, unpad_input_for_concatenated_sequences
 
 """ We use the following notation throughout this file:
      h: hidden size
@@ -304,6 +304,7 @@ class ParallelAttention(MegatronModule):
         self.num_attention_heads_kv = args.num_attention_heads_kv
         self.num_attention_heads = args.num_attention_heads
         self.seq_length = args.seq_length
+        self.packed_input = args.packed_input
         if self.use_flash_attn:
             assert attention_type == AttnType.self_attn, ('FlashAttention code path only supports '
                                                           'self-attention for now')
@@ -513,14 +514,57 @@ class ParallelAttention(MegatronModule):
                 context_layer = self.core_attention(
                     query_layer, key_layer, value_layer, attention_mask)
         else:
-            q, k, v = [rearrange(x, "s b n h -> b s n h").contiguous()
-                       for x in (query_layer, key_layer, value_layer)]
-            if not self.sequence_parallel:
-                with megatron.core.tensor_parallel.get_cuda_rng_tracker().fork():
-                    context_layer = self.core_attention_flash(q, k, v, causal=True)
+            if self.packed_input:
+                # assume attention_mask is `attention_mask_in_length` (which is 2D with shape batch x seqlen)
+                seqlen, bsz = key_layer.shape[:2]
+                assert attention_mask.shape == (bsz, seqlen), f"attention_mask shape {attention_mask.shape} does not match expected attention_mask_in_length shape {(bsz, seqlen)}"
+                attention_mask_in_length = attention_mask
+
+                # following https://github.com/Dao-AILab/flash-attention/issues/432#issuecomment-1698610752
+                # to handle packed input for flash attention
+                qkv = torch.stack(
+                    # each is [seqlen, bsz, nh, hd]
+                    [query_layer, key_layer, value_layer], dim=2
+                )  # [seqlen, bsz, 3, num_heads, hidden_size]
+                qkv = qkv.transpose(0, 1)  # [bsz, seqlen, 3, num_heads, hidden_size]
+                nheads = qkv.shape[-2]
+                x = rearrange(qkv, "b s three n h -> b s (three n h)")
+                x_unpad, indices, cu_q_lens, max_s = unpad_input_for_concatenated_sequences(
+                    x, attention_mask_in_length
+                )
+                x_unpad = rearrange(
+                    x_unpad, "nnz (three n h) -> nnz three n h", three=3, n=nheads
+                )
+
+                if not self.sequence_parallel:
+                    with megatron.core.tensor_parallel.get_cuda_rng_tracker().fork():
+                        output_unpad = flash_attn.flash_attn_varlen_qkvpacked_func(
+                            x_unpad, cu_q_lens, max_s, 0.0, softmax_scale=None, causal=True
+                        )
+                else:
+                    output_unpad = flash_attn.flash_attn_varlen_qkvpacked_func(
+                        x_unpad, cu_q_lens, max_s, 0.0, softmax_scale=None, causal=True
+                    )
+
+                output = rearrange(
+                    pad_input(
+                        rearrange(output_unpad, "nnz n h -> nnz (n h)"),
+                        indices, bsz, seqlen
+                    ),
+                    "b s (n h) -> b s n h",
+                    h=nheads,
+                )
+                context_layer = rearrange(output, "b s n h -> s b (n h)").contiguous()
+
             else:
-                context_layer = self.core_attention_flash(q, k, v, causal=True)
-            context_layer = rearrange(context_layer, 'b s n h -> s b (n h)').contiguous()
+                q, k, v = [rearrange(x, "s b n h -> b s n h").contiguous()
+                        for x in (query_layer, key_layer, value_layer)]
+                if not self.sequence_parallel:
+                    with megatron.core.tensor_parallel.get_cuda_rng_tracker().fork():
+                        context_layer = self.core_attention_flash(q, k, v, causal=True)
+                else:
+                    context_layer = self.core_attention_flash(q, k, v, causal=True)
+                context_layer = rearrange(context_layer, 'b s n h -> s b (n h)').contiguous()
 
         # =================
         # Output. [sq, b, h]
