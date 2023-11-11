@@ -84,10 +84,11 @@ def get_batch(data_iterator):
     else:
         data = None
     data_b = tensor_parallel.broadcast_data(keys, data, torch.int64)
-    data_b_float = tensor_parallel.broadcast_data(float_keys, data, torch.float32)
-    for key in float_keys:
-        data_b[key] = data_b_float[key]
-    del data_b_float
+    if float_keys:
+        data_b_float = tensor_parallel.broadcast_data(float_keys, data, torch.float32)
+        for key in float_keys:
+            data_b[key] = data_b_float[key]
+        del data_b_float
 
     # Unpack.
     tokens = data_b["text"]
