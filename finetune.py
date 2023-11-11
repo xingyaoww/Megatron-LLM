@@ -9,7 +9,7 @@ from megatron import get_args, get_tokenizer, get_timers, get_counters, print_ra
 from megatron.training import pretrain
 from megatron.core import tensor_parallel
 from megatron.core.parallel_state import get_data_parallel_group
-from megatron.model import GPTModel, ModelType, LlamaModel, FalconModel
+from megatron.model import GPTModel, ModelType, LlamaModel, FalconModel, MistralModel
 from megatron.utils import get_ltor_masks_and_position_ids, average_losses_across_data_parallel_group
 from megatron.data.gpt_dataset import build_train_valid_test_datasets as gpt_build_datasets
 from megatron.data.instruction_dataset import instruction_collator
@@ -35,8 +35,10 @@ def model_provider(pre_process: bool = True, post_process: bool = True):
         cls = FalconModel
     elif args.model_name in {"llama", "llama2", "codellama"}:
         cls = partial(LlamaModel, version=1 if args.model_name == "llama" else 2)
+    elif args.model_name == "mistral":
+        cls = MistralModel
     else:
-        raise KeyError(f"Unkown model {other}")
+        raise KeyError(f"Unkown model {args.model_name}")
 
     if isinstance(args.model_type, ModelType):
         model_type = args.model_type
@@ -82,10 +84,11 @@ def get_batch(data_iterator):
     else:
         data = None
     data_b = tensor_parallel.broadcast_data(keys, data, torch.int64)
-    data_b_float = tensor_parallel.broadcast_data(float_keys, data, torch.float32)
-    for key in float_keys:
-        data_b[key] = data_b_float[key]
-    del data_b_float
+    if float_keys:
+        data_b_float = tensor_parallel.broadcast_data(float_keys, data, torch.float32)
+        for key in float_keys:
+            data_b[key] = data_b_float[key]
+        del data_b_float
 
     # Unpack.
     tokens = data_b["text"]
@@ -208,7 +211,7 @@ def extra_args(parser):
     """Text generation arguments."""
     group = parser.add_argument_group(title='validation set')
     group.add_argument("--model_name",
-                       choices={"gpt", "llama", "falcon", "llama2", "codellama"},
+                       choices={"gpt", "llama", "falcon", "llama2", "codellama", "mistral"},
                        default="gpt")
     group.add_argument("--model_type", choices={"encoder_or_decoder", "encoder_and_decoder"},
                        default="encoder_or_decoder")
@@ -227,11 +230,11 @@ if __name__ == "__main__":
     if args.data_type == "gpt":
         collate_fn = None
     else:
-        print_rank_0("Instruction collator will return attention_mask_in_length due to both packed input and flash attn usage.")
+        return_attention_mask_in_length = args.packed_input and args.use_flash_attn
         collate_fn = partial(
             instruction_collator,
             scalar_loss_mask=args.scalar_loss_mask,
-            return_attention_mask_in_length=args.packed_input and args.use_flash_attn
+            return_attention_mask_in_length=return_attention_mask_in_length
         )
 
 
