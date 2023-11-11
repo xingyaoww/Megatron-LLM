@@ -301,7 +301,7 @@ class ParallelAttention(MegatronModule):
         self.params_dtype = args.params_dtype
         self.sequence_parallel = args.sequence_parallel
         self.use_flash_attn = args.use_flash_attn
-        self.sliding_window_size = args.sliding_window
+        self.sliding_window_size = args.sliding_window_size
         self.num_attention_heads_kv = args.num_attention_heads_kv
         self.num_attention_heads = args.num_attention_heads
         self.seq_length = args.seq_length
