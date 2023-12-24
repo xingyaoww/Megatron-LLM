@@ -218,6 +218,8 @@ def extra_args(parser):
                        default="gpt")
     group.add_argument("--model_type", choices={"encoder_or_decoder", "encoder_and_decoder"},
                        default="encoder_or_decoder")
+    group.add_argument("--loss_role", choices={"assistant", "user"},
+                       default="assistant")
     group.add_argument("--data_type", choices={"gpt", "instruction"},
                        default="gpt")
     group.add_argument("--log_learning_rate_to_tensorboard", type=bool, default=True)
@@ -237,8 +239,10 @@ if __name__ == "__main__":
         collate_fn = partial(
             instruction_collator,
             scalar_loss_mask=args.scalar_loss_mask,
-            return_attention_mask_in_length=return_attention_mask_in_length
+            return_attention_mask_in_length=return_attention_mask_in_length,
+            loss_role=args.loss_role,
         )
+        print_rank_0(f"Loss role set to {args.loss_role} for instruction dataset")
 
 
     pretrain(args, data_provider, model_provider,  ModelType.encoder_or_decoder,

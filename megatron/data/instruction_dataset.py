@@ -377,8 +377,10 @@ def get_attention_mask_and_position_ids(data, attention_mask, example_ids):
 def instruction_collator(
     data,
     scalar_loss_mask=0.0,
-    return_attention_mask_in_length: bool = False
+    return_attention_mask_in_length: bool = False,
+    loss_role: str = "assistant",
 ):
+    assert loss_role in ["assistant", "user"]
     args = get_args()
     tokenizer = get_tokenizer()
     pad_id = tokenizer.pad
@@ -440,8 +442,10 @@ def instruction_collator(
             attention_mask_in_length[i, current_example_id] = cur_count
 
     # Loss mask
-    # - only calculate loss for assistant tokens
-    loss_mask[role == Role.assistant.value] = 1.0
+    # - only calculate loss for loss role
+    loss_role = Role[loss_role].value
+    loss_mask[role == loss_role] = 1.0
+
     # - completely ignore padding tokens
     loss_mask[input == pad_id] = 0.0
 
