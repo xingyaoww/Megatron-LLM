@@ -380,7 +380,7 @@ def instruction_collator(
     return_attention_mask_in_length: bool = False,
     loss_role: str = "assistant",
 ):
-    assert loss_role in ["assistant", "user"]
+    assert loss_role in ["assistant", "user", "all"]
     args = get_args()
     tokenizer = get_tokenizer()
     pad_id = tokenizer.pad
@@ -443,8 +443,11 @@ def instruction_collator(
 
     # Loss mask
     # - only calculate loss for loss role
-    loss_role = Role[loss_role].value
-    loss_mask[role == loss_role] = 1.0
+    if loss_role == "all":
+        loss_mask = torch.ones_like(attention_mask, dtype=torch.float)
+    else:
+        loss_role = Role[loss_role].value
+        loss_mask[role == loss_role] = 1.0
 
     # - completely ignore padding tokens
     loss_mask[input == pad_id] = 0.0
