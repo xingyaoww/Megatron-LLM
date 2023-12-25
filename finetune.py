@@ -218,7 +218,7 @@ def extra_args(parser):
                        default="gpt")
     group.add_argument("--model_type", choices={"encoder_or_decoder", "encoder_and_decoder"},
                        default="encoder_or_decoder")
-    group.add_argument("--loss_role", choices={"assistant", "user"},
+    group.add_argument("--loss_role", choices={"assistant", "user", "all"},
                        default="assistant")
     group.add_argument("--data_type", choices={"gpt", "instruction"},
                        default="gpt")
