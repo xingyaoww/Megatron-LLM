@@ -60,6 +60,7 @@ class GPTModel(MegatronModule):
         self.pre_process = pre_process
         self.post_process = post_process
         self.fp16_lm_cross_entropy = args.fp16_lm_cross_entropy
+        self.do_moe_mlp = args.do_moe_mlp
 
         # self.language_model, self._language_model_key = megatron.model.language_model(
         self.language_model, self._language_model_key = megatron.model.language_model.get_language_model(
@@ -89,15 +90,24 @@ class GPTModel(MegatronModule):
             position_ids,
             attention_mask,
             inference_params=inference_params)
-
+        
+        if self.do_moe_mlp:
+            lm_output, all_router_logits = lm_output
+        
         if self.post_process:
-            return post_language_model_processing(
+            ret = post_language_model_processing(
                 lm_output, labels,
                 self.word_embeddings_weight(),
                 self.parallel_output,
                 self.fp16_lm_cross_entropy)
         else:
-            return lm_output
+            ret = lm_output
+        
+        if self.do_moe_mlp:
+            return ret, all_router_logits
+        else:
+            return ret
+
 
     def state_dict_for_save_checkpoint(self, prefix='', keep_vars=False):
         state_dict_ = {}

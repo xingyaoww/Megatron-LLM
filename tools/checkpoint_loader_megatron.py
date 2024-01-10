@@ -1,5 +1,6 @@
 import json
 import os
+import gc
 import sys
 import types
 
@@ -66,7 +67,7 @@ def _load_checkpoint(queue, args):
         margs.load_iters = args.load_iters
 
     margs = load_args_from_checkpoint(margs)
-
+    gc.collect()
     # Arguments do sanity checks on the world size, but we don't care,
     # so trick it into thinking we are plenty of processes
     margs.world_size = margs.tensor_model_parallel_size * margs.pipeline_model_parallel_size
@@ -97,7 +98,7 @@ def _load_checkpoint(queue, args):
     if args.model_type == 'GPT':
         from pretrain_gpt import model_provider
         margs.model_type = ModelType.encoder_or_decoder
-    elif args.model_type in {"falcon", "llama", "llama2", "codellama", "mistral"}:
+    elif args.model_type in {"falcon", "llama", "llama2", "codellama", "mistral", "mixtral"}:
         from finetune import model_provider
         margs.model_name = args.model_type
         margs.model_type = ModelType.encoder_or_decoder
@@ -193,6 +194,10 @@ def _load_checkpoint(queue, args):
     md.tie_embed_logits = margs.tie_embed_logits
     md.params_dtype = margs.params_dtype
     md.sliding_window_size = margs.sliding_window_size
+    md.do_moe_mlp = margs.do_moe_mlp
+    md.num_experts_per_tok = margs.num_experts_per_tok
+    md.num_local_experts = margs.num_local_experts
+    md.router_aux_loss_coef = margs.router_aux_loss_coef
     if margs.position_embedding_type == PositionEmbeddingType.absolute:
         md.position_embedding_type = "absolute"
     elif margs.position_embedding_type == PositionEmbeddingType.rotary:
@@ -201,9 +206,11 @@ def _load_checkpoint(queue, args):
         raise KeyError(f"Unknown position embedding {margs.position_embedding_type}")
 
     # Get first pipe stage
+    gc.collect()
     mpu.set_pipeline_model_parallel_rank(0)
     post_process = pp_size == 1
     models = _get_models(tp_size, md.params_dtype, True, post_process)
+    gc.collect()
     models_init = models
 
     md.consumed_train_samples = consumed_train_samples
@@ -274,6 +281,7 @@ def _load_checkpoint(queue, args):
             qkv_weight = []
             qkv_bias = []
             dense_weight = []
+            moe_gate_weight = []  # only for moe
             mlp_l0_weight = []
             mlp_l0_bias = []
             mlp_l1_weight = []
@@ -283,12 +291,28 @@ def _load_checkpoint(queue, args):
                 if margs.use_bias:
                     qkv_bias.append(layer.self_attention.query_key_value.bias.data)
                 dense_weight.append(layer.self_attention.dense.weight.data)
-                mlp_l0_weight.append(layer.mlp.dense_h_to_4h.weight.data)
-                if margs.use_bias:
-                    mlp_l0_bias.append(layer.mlp.dense_h_to_4h.bias.data)
-                mlp_l1_weight.append(layer.mlp.dense_4h_to_h.weight.data)
+
+                if margs.do_moe_mlp:
+                    for expert_id in range(margs.num_local_experts):
+                        mlp_l0_weight.append(
+                            layer.mlp.experts[expert_id].dense_h_to_4h.weight.data
+                        )
+                        if margs.use_bias:
+                            raise NotImplementedError("moe_mlp with bias not implemented")
+                        mlp_l1_weight.append(
+                            layer.mlp.experts[expert_id].dense_4h_to_h.weight.data
+                        )
+                    moe_gate_weight.append(layer.mlp.gate.weight.data)
+                else:
+                    mlp_l0_weight.append(layer.mlp.dense_h_to_4h.weight.data)
+                    if margs.use_bias:
+                        mlp_l0_bias.append(layer.mlp.dense_h_to_4h.bias.data)
+                    mlp_l1_weight.append(layer.mlp.dense_4h_to_h.weight.data)
 
             # concat them
+            if margs.do_moe_mlp:
+                message["moe gate weight"] = torch.cat(moe_gate_weight, dim=0)
+
             message["qkv weight"] = torch.cat(qkv_weight, dim=0)
             if margs.use_bias:
                 message["qkv bias"] = torch.cat(qkv_bias, dim=0)

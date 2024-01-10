@@ -9,6 +9,7 @@ from .gpt_model import GPTModel
 from .llama_model import LlamaModel
 from .falcon_model import FalconModel
 from .mistral_model import MistralModel
+from .mixtral_model import MixtralModel
 from .t5_model import T5Model
 from .module import Float16Module
 from .enums import ModelType

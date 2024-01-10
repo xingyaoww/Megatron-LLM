@@ -141,6 +141,106 @@ class ParallelMLP(MegatronModule):
         return output, output_bias
 
 
+
+class ParallelMLPMoe(MegatronModule):
+
+    def __init__(self,
+                 init_method,
+                 output_layer_init_method,
+                 args,
+                 world_size,
+                 ):
+
+        super().__init__()
+        self.num_experts = args.num_local_experts
+        self.top_k = args.num_experts_per_tok
+        self.use_bias = args.use_bias
+        # reference:
+        # https://github.com/huggingface/transformers/blob/701298d2d3d5c7bde45e71cce12736098e3f05ef/src/transformers/models/mixtral/modeling_mixtral.py#L797
+    
+        # gating
+        self.gate = megatron.core.tensor_parallel.ColumnParallelLinear(
+            args.hidden_size,
+            self.num_experts,
+            bias=False,
+            gather_output=False,
+            init_method=init_method,
+            skip_bias_add=True,
+            async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
+            **_args_to_kwargs(args),
+            world_size=world_size)
+
+        self.experts = torch.nn.ModuleList([
+            ParallelMLP(
+                init_method,
+                output_layer_init_method,
+                args,
+                world_size
+            )
+            for _ in range(self.num_experts)
+        ])
+
+
+    def forward(self, hidden_states):
+        # hidden_states: [s, b, h]
+        sequence_length, batch_size, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)  # [s*b, h]
+        # router_logits: (sequence_length * batch, n_experts)
+        router_logits = self.gate(hidden_states)
+
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+        routing_weights /= routing_weights.sum(dim=-1, keepdim=True) # (sequence_length * batch, top_k)
+        # we cast back to the input dtype
+        routing_weights = routing_weights.to(hidden_states.dtype)
+
+        final_hidden_states = torch.zeros(
+            (sequence_length * batch_size, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
+        )
+        if self.use_bias:
+            raise NotImplementedError("Bias is not supported yet for MoE")
+
+        # One hot encode the selected experts to create an expert mask
+        # this will be used to easily index which expert is going to be sollicitated
+        expert_mask = torch.nn.functional.one_hot(
+            selected_experts,  # shape: (sequence_length * batch, top_k)
+            num_classes=self.num_experts
+        ) # shape: (sequence_length * batch, top_k, n_experts)
+        expert_mask = expert_mask.permute(2, 1, 0)  # shape: (n_experts, top_k, sequence_length * batch)
+
+        # Loop over all available experts in the model and perform the computation on each expert
+        for expert_idx in range(self.num_experts):
+            expert_layer = self.experts[expert_idx]
+            idx, top_x = torch.where(
+                expert_mask[expert_idx]  # shape: (top_k, sequence_length * batch)
+            )
+            # idx is the expert index after topk for routing_weights and selected_experts 
+            # top_x is the indices of the tokens that are routed to the current expert
+
+            if top_x.shape[0] == 0:
+                continue
+
+            # in torch it is faster to index using lists than torch tensors
+            top_x_list = top_x.tolist()
+            idx_list = idx.tolist()
+
+            # Index the correct hidden states and compute the expert hidden state for
+            # the current expert. We need to make sure to multiply the output hidden
+            # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
+            # hidden_states: (sequence_length * batch, hidden_dim)
+            current_state = hidden_states[None, top_x_list].reshape(-1, hidden_dim)
+            # current_hidden_states = expert_layer(current_state) * routing_weights[top_x_list, idx_list, None]
+            current_hidden_states, cur_output_bias = expert_layer(current_state) \
+                * routing_weights[top_x_list, idx_list, None]
+            # TODO: support bias so that `cur_output_bias` can be used
+
+            # However `index_add_` only support torch tensors for indexing so we'll use
+            # the `top_x` tensor here.
+            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
+        # final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+        final_hidden_states = final_hidden_states.view(sequence_length, batch_size, hidden_dim)
+        return final_hidden_states, None, router_logits  # hidden_states, bias, router_logits (new for MoE)
+
 class CoreAttention(MegatronModule):
     def __init__(self,
                  layer_number,
@@ -680,6 +780,7 @@ class ParallelTransformerLayer(MegatronModule):
         self.bf16 = args.bf16
         self.fp32_residual_connection = args.fp32_residual_connection
         self.parallel_layernorm = args.parallel_layernorm
+        self.do_moe_mlp = args.do_moe_mlp
 
         # Layernorm on the input data.
         if args.use_rms_norm:
@@ -760,7 +861,10 @@ class ParallelTransformerLayer(MegatronModule):
                     eps=args.layernorm_epsilon,
                     sequence_parallel=args.sequence_parallel)
 
-        self.mlp = ParallelMLP(init_method, output_layer_init_method, args, world_size)
+        if self.do_moe_mlp:
+            self.mlp = ParallelMLPMoe(init_method, output_layer_init_method, args, world_size)
+        else:
+            self.mlp = ParallelMLP(init_method, output_layer_init_method, args, world_size)
 
         # Set bias+dropout+add fusion grad_enable execution handler.
         TORCH_MAJOR = int(torch.__version__.split('.')[0])
@@ -876,7 +980,10 @@ class ParallelTransformerLayer(MegatronModule):
         # elif parallel_layernorm: the mlp_layernorm output,
         # elif parallel_attention: the input_layernorm tensor.
         # else: the post_attention_layernorm output,
-        mlp_output, mlp_bias = self.mlp(layernorm_output)
+        if self.do_moe_mlp:
+            mlp_output, mlp_bias, router_logits = self.mlp(layernorm_output, layernorm_output)
+        else:
+            mlp_output, mlp_bias = self.mlp(layernorm_output)
 
         # Second residual connection.
         if self.parallel_attn:
@@ -890,7 +997,11 @@ class ParallelTransformerLayer(MegatronModule):
 
         # Apply final layernorm, return.
         output = self.output_layernorm(output)
-        return output
+
+        if self.do_moe_mlp:
+            return output, router_logits
+        else:
+            return output
 
 
 class NoopTransformerLayer(MegatronModule):
@@ -1005,6 +1116,14 @@ class ParallelTransformer(MegatronModule):
             args.distribute_saved_activations and not args.sequence_parallel
 
         self.sequence_parallel = args.sequence_parallel
+
+        self.do_moe_mlp = args.do_moe_mlp
+        if self.do_moe_mlp:
+            assert args.num_experts_per_tok is not None and args.num_local_experts is not None
+            assert args.num_experts_per_tok > 0
+            assert args.num_local_experts > 0
+            assert args.num_experts_per_tok <= args.num_local_experts
+            assert args.transformer_impl == 'local', 'MoE only supported with local transformer implementation'
 
         # Transformer Engine Init.
         if self.transformer_impl == 'transformer_engine':
@@ -1288,6 +1407,9 @@ class ParallelTransformer(MegatronModule):
             keep_graph=True,
         )
 
+        if self.do_moe_mlp:
+            all_router_logits = ()
+
         if self.sequence_parallel:
             rng_context = megatron.core.tensor_parallel.get_cuda_rng_tracker().fork()
         else:
@@ -1331,10 +1453,16 @@ class ParallelTransformer(MegatronModule):
                     for index in range(self.num_layers):
                         layer = self._get_layer(index)
 
-                        hidden_states = layer(
-                            hidden_states,
-                            attention_mask,
-                            **forward_kwargs)
+                        if self.do_moe_mlp:
+                            hidden_states, router_logits = layer(hidden_states,
+                                                                  attention_mask,
+                                                                  **forward_kwargs)
+                            all_router_logits += (router_logits,)
+                        else:
+                            hidden_states = layer(
+                                hidden_states,
+                                attention_mask,
+                                **forward_kwargs)
 
                 # Skip counter update for eval and activation checkpointing
                 if torch.is_grad_enabled() and self.training:
@@ -1344,4 +1472,8 @@ class ParallelTransformer(MegatronModule):
         # not done for the "post_ln" convention https://sh-tsang.medium.com/review-pre-ln-transformer-on-layer-normalization-in-the-transformer-architecture-b6c91a89e9ab
         if self.post_process and (not self.use_post_ln):
             hidden_states = self.final_layernorm(hidden_states)
-        return hidden_states
+        
+        if self.do_moe_mlp:
+            return hidden_states, all_router_logits
+        else:
+            return hidden_states

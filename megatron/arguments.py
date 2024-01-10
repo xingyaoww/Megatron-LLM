@@ -478,6 +478,11 @@ def _add_network_size_args(parser):
     # Added for Mistral
     group.add_argument("--sliding_window_size", type=int, default=None,
                        help="Whether to use sliding window attention for Mistral. Default is None, which means no sliding window attention.")
+    # Added for Mixtral (MoE-related)
+    group.add_argument("--do_moe_mlp", action="store_true")
+    group.add_argument("--num_experts_per_tok", type=int, default=None)
+    group.add_argument("--num_local_experts", type=int, default=None)
+    group.add_argument("--router_aux_loss_coef", type=float, default=None)
     return parser
 
 

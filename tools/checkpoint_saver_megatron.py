@@ -126,6 +126,14 @@ def save_checkpoint(queue, args):
         sys.argv += ["--no_tie_embed_logits"]
     if md.lima_dropout:
         sys.argv += ["--lima_dropout"]
+    if md.do_moe_mlp:
+        sys.argv += ["--do_moe_mlp"]
+    if md.num_experts_per_tok:
+        sys.argv += ["--num_experts_per_tok", str(md.num_experts_per_tok)]
+    if md.num_local_experts:
+        sys.argv += ["--num_local_experts", str(md.num_local_experts)]
+    if md.router_aux_loss_coef:
+        sys.argv += ["--router_aux_loss_coef", str(md.router_aux_loss_coef)]
 
     if md.make_vocab_size_divisible_by is not None:
         sys.argv.extend(['--make_vocab_size_divisible_by', str(md.make_vocab_size_divisible_by)])
@@ -154,7 +162,7 @@ def save_checkpoint(queue, args):
     elif md.model_type == 'BERT':
         from pretrain_bert import model_provider
         margs.model_type = ModelType.encoder_or_decoder
-    elif md.model_type in {'falcon', 'llama', 'llama2', 'codellama', 'mistral'}:
+    elif md.model_type in {'falcon', 'llama', 'llama2', 'codellama', 'mistral', 'mixtral'}:
         from finetune import model_provider
         margs.model_name = args.model_type
         margs.model_type = ModelType.encoder_or_decoder
@@ -291,17 +299,28 @@ def save_checkpoint(queue, args):
             if md.use_bias:
                 qkv_bias = torch.chunk(msg.pop("qkv bias"), args.target_tensor_parallel_size, dim=0)
             dense_weight = torch.chunk(msg.pop("dense weight"), args.target_tensor_parallel_size, dim=1)
+
+            mlp_n_chunk = args.target_tensor_parallel_size
+            if md.do_moe_mlp:
+                mlp_n_chunk *= md.num_local_experts
+                moe_gate_weight = torch.chunk(msg.pop("moe gate weight"), args.target_tensor_parallel_size, dim=0)
             if md.glu_activation is None:
-                mlp_l0_weight = torch.chunk(msg.pop("mlp l0 weight"), args.target_tensor_parallel_size, dim=0)
+                mlp_l0_weight = torch.chunk(
+                    msg.pop("mlp l0 weight"),
+                    mlp_n_chunk,
+                    dim=0
+                )
             else:
                 up_weight, gate_weight = torch.chunk(msg.pop("mlp l0 weight"), 2, dim=0)
-                up_weights = torch.chunk(up_weight, args.target_tensor_parallel_size, dim=0)
-                gate_weights = torch.chunk(gate_weight, args.target_tensor_parallel_size, dim=0)
+                up_weights = torch.chunk(up_weight, mlp_n_chunk, dim=0)
+                gate_weights = torch.chunk(gate_weight, mlp_n_chunk, dim=0)
                 mlp_l0_weight = [torch.cat([up_weight, gate_weight], dim=0)
                                  for up_weight, gate_weight in zip(up_weights, gate_weights)]
             if md.use_bias:
-                mlp_l0_bias = torch.chunk(msg.pop("mlp l0 bias"), args.target_tensor_parallel_size, dim=0)
-            mlp_l1_weight = torch.chunk(msg.pop("mlp l1 weight"), args.target_tensor_parallel_size, dim=1)
+                mlp_l0_bias = torch.chunk(msg.pop("mlp l0 bias"), mlp_n_chunk, dim=0)
+                if md.do_moe_mlp:
+                    raise NotImplementedError("moe_mlp not implemented for use bias")
+            mlp_l1_weight = torch.chunk(msg.pop("mlp l1 weight"), mlp_n_chunk, dim=1)
 
             # Save them to the model
             for tp_rank in range(args.target_tensor_parallel_size):
@@ -322,11 +341,24 @@ def save_checkpoint(queue, args):
                     l.post_attention_layernorm.weight.data.copy_(post_layernorm_weight)
                     if not md.use_rms_norm:
                         l.post_attention_layernorm.bias.data.copy_(post_layernorm_bias)
-                l.mlp.dense_h_to_4h.weight.data.copy_(mlp_l0_weight[tp_rank])
-                l.mlp.dense_4h_to_h.weight.data.copy_(mlp_l1_weight[tp_rank])
-                if md.use_bias:
-                    l.mlp.dense_h_to_4h.bias.data.copy_(mlp_l0_bias[tp_rank])
-                    l.mlp.dense_4h_to_h.bias.data.copy_(mlp_l1_bias)
+
+                if md.do_moe_mlp:
+                    l.mlp.gate.weight.data.copy_(moe_gate_weight[tp_rank])
+                    for i in range(md.num_local_experts):
+                        l.mlp.experts[i].dense_h_to_4h.weight.data.copy_(
+                            mlp_l0_weight[tp_rank * md.num_local_experts + i]
+                        )
+                        l.mlp.experts[i].dense_4h_to_h.weight.data.copy_(
+                            mlp_l1_weight[tp_rank * md.num_local_experts + i]
+                        )
+                    if md.use_bias:
+                        raise NotImplementedError("moe_mlp not implemented for use bias")
+                else:
+                    l.mlp.dense_h_to_4h.weight.data.copy_(mlp_l0_weight[tp_rank])
+                    l.mlp.dense_4h_to_h.weight.data.copy_(mlp_l1_weight[tp_rank])
+                    if md.use_bias:
+                        l.mlp.dense_h_to_4h.bias.data.copy_(mlp_l0_bias[tp_rank])
+                        l.mlp.dense_4h_to_h.bias.data.copy_(mlp_l1_bias)
             total_layer_num = total_layer_num + 1
             check_message(msg)
 

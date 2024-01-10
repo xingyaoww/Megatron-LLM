@@ -583,6 +583,10 @@ def load_args_from_checkpoint(args, load_arg='load'):
     _set_arg('make_vocab_size_divisible_by', force=True)
     _set_arg('train_iters')
     _set_arg('sliding_window_size')
+    _set_arg('do_moe_mlp', force=True)
+    _set_arg('num_experts_per_tok')
+    _set_arg('num_local_experts')
+    _set_arg('router_aux_loss_coef')
     if checkpoint_version < 3.0:
         _set_arg('tensor_model_parallel_size',
                  'model_parallel_size')
