@@ -35,6 +35,7 @@ stored therein will not be removed when the conversion succeeds.
 """
 
 import re
+import gc
 import sys
 import shutil
 from pathlib import Path
@@ -43,11 +44,10 @@ from argparse import ArgumentParser, Namespace
 
 import torch
 from tqdm.auto import trange
-from transformers import AutoModelForCausalLM, LlamaTokenizer
+from transformers import AutoModelForCausalLM, LlamaTokenizer, AutoTokenizer
 
 from utils.permute_qkv import permute_qkv
 from utils.merge_llama import merge_llama
-
 
 llama_s2layer = {7: 32, 13: 40, 30: 60, 34: 48, 65: 80, 70: 80}
 llama_s2heads = {7: 32, 13: 40, 30: 52, 34: 64, 65: 64, 70: 64}
@@ -254,6 +254,90 @@ def mistral_to_megatron(
     return {"embedding": embedding, "transformer": transformer,
             "lm_head": lm_head}
 
+def mixtral_to_megatron(
+    weights: dict,
+    size: int
+) -> dict:
+    assert size == 7
+    def permute(qkv_w):
+        # if source == "hf":
+        # by default, we pull mistrals weights from huggingface
+        return permute_qkv(qkv_w, hidden, n_heads, n_kv_heads)
+        # return qkv_w
+
+    def rearrange_qkv(wq, wk, wv):
+        wq = torch.split(wq, n_hidden_per_head, dim=0)
+        wk = torch.split(wk, n_hidden_per_head, dim=0)
+        wv = torch.split(wv, n_hidden_per_head, dim=0)
+        assert len(wq) == n_heads
+        assert len(wk) == n_kv_heads
+        assert len(wv) == n_kv_heads
+        n_qs_per_kv = n_heads//n_kv_heads
+        w_qkv = []
+        for i in range(n_kv_heads):
+            w_qkv += [wq[i*n_qs_per_kv + j] for j in range(n_qs_per_kv)]
+            w_qkv += [wk[i], wv[i]]
+        return permute(torch.concat(w_qkv))
+
+    # config
+    if size == 7:
+        n_layer = 32
+        hidden = 4096
+        n_heads = 32
+        n_kv_heads = 8
+        num_local_experts = 8
+    n_hidden_per_head = hidden // n_heads
+
+    # weights independent of layers
+    embedding = {"word_embeddings.weight": weights["model.embed_tokens.weight"]}
+    transformer = {"final_layernorm.weight": weights["model.norm.weight"]}
+    lm_head = weights["lm_head.weight"]
+
+    # get all the other weights
+    for layer in trange(n_layer, desc="Converting weights"):
+        prefix = f"layers.{layer}"
+        hf_prefix = f"model.{prefix}"
+        # Attention
+        transformer[f"{prefix}.attention.dense.weight"] = \
+            weights[f"{hf_prefix}.self_attn.o_proj.weight"]
+        transformer[f"{prefix}.post_attention_layernorm.weight"] = \
+            weights[f"{hf_prefix}.post_attention_layernorm.weight"]
+        transformer[f"{prefix}.input_layernorm.weight"] = \
+            weights[f"{hf_prefix}.input_layernorm.weight"]
+        # finally, qkv requires serious manipulation to get right (probably same as llama-2)
+        transformer[f"{prefix}.attention.query_key_value.weight"] = rearrange_qkv(
+            weights[f"{hf_prefix}.self_attn.q_proj.weight"],
+            weights[f"{hf_prefix}.self_attn.k_proj.weight"],
+            weights[f"{hf_prefix}.self_attn.v_proj.weight"]
+        )
+        del weights[f"{hf_prefix}.self_attn.q_proj.weight"]
+        del weights[f"{hf_prefix}.self_attn.k_proj.weight"]
+        del weights[f"{hf_prefix}.self_attn.v_proj.weight"]
+        
+        # MLP
+        transformer[f"{prefix}.mlp.gate.weight"] = weights[f"{hf_prefix}.block_sparse_moe.gate.weight"]
+        
+        for expert_id in range(num_local_experts):
+            expert_prefix = f"block_sparse_moe.experts.{expert_id}"
+            megatron_expert_prefix = f"experts.{expert_id}"
+            transformer[f"{prefix}.mlp.{megatron_expert_prefix}.dense_4h_to_h.weight"] = \
+                weights[f"{hf_prefix}.{expert_prefix}.w2.weight"]
+                # weights[f"{hf_prefix}.mlp.down_proj.weight"]
+            # concatenate up, gate mlp weights
+            transformer[f"{prefix}.mlp.{megatron_expert_prefix}.dense_h_to_4h.weight"] = torch.concat([
+                # weights[f"{hf_prefix}.mlp.up_proj.weight"],  # w3
+                weights[f"{hf_prefix}.{expert_prefix}.w3.weight"],  # w3
+                # weights[f"{hf_prefix}.mlp.gate_proj.weight"]  # w1
+                weights[f"{hf_prefix}.{expert_prefix}.w1.weight"]  # w1
+            ])
+            # release references to original weights (free mem)
+            del weights[f"{hf_prefix}.{expert_prefix}.w3.weight"]
+            del weights[f"{hf_prefix}.{expert_prefix}.w1.weight"]
+        gc.collect()
+
+    return {"embedding": embedding, "transformer": transformer,
+            "lm_head": lm_head}
+
 
 def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
          cache_dir: Optional[Path] = None, model_path: Optional[str] = None):
@@ -277,6 +361,15 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
                                                     trust_remote_code=True,
                                                     cache_dir=cache_dir)
         hf_weights = model.state_dict()
+    elif model_name == "mixtral":
+        print("Fetching weights from huggingface")
+        if model_path is None:
+            model_path = "mistralai/Mixtral-8x7B-v0.1"
+        model = AutoModelForCausalLM.from_pretrained(model_path,
+                                                    trust_remote_code=True,
+                                                    cache_dir=cache_dir,
+                                                    torch_dtype=torch.bfloat16)
+        hf_weights = model.state_dict()
     else:
         print("Getting llama...")
         version = 2 if "2" in model_name else 1
@@ -288,12 +381,15 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
         megatron_weights = falcon_to_megatron(hf_weights, size)
     elif model_name == "mistral":
         megatron_weights = mistral_to_megatron(hf_weights, size)
+    elif model_name == "mixtral":
+        megatron_weights = mixtral_to_megatron(hf_weights, size)
     else:
         megatron_weights = llama_to_megatron(hf_weights, size, llama_source,
                                              version=1 if model_name == "llama" else 2)
 
     # set args
     dtype = megatron_weights["embedding"]["word_embeddings.weight"].dtype
+    print(f"Saving with dtype {dtype}")
     if model_name == "falcon":
         if size == 7:
             args = {"num_layers": 32, "hidden_size": 4544,
@@ -329,6 +425,40 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
             "layernorm_epsilon": 1e-5,
             "rope_theta": 10000.0,
             "sliding_window_size": 4096,
+        }
+    elif model_name == "mixtral":
+        assert size == 7
+        # mixtral-8x7b mostly uses the same args as mistral-7b AND llama-7b
+        # https://huggingface.co/mistralai/Mixtral-8x7B-v0.1/blob/main/config.json
+        args = {
+            "num_layers": 32,
+            "hidden_size": 4096,
+            "num_attention_heads": 32,
+            "num_attention_heads_kv": 8,  # except this - GroupedAttention
+            "ffn_hidden_size": 14336,  # except this
+            "parallel_attn": False,
+            "make_vocab_size_divisible_by": 128,
+            "glu_activation": "swiglu",  # == silu
+            "padded_vocab_size": 32000,
+            "use_rms_norm": True,
+            "tie_embed_logits": False,
+            "tokenizer_type": "SentencePieceTokenizer",
+            
+            "max_position_embeddings": 32768,
+            "seq_length": 32768,
+            "layernorm_epsilon": 1e-5,
+
+            # DIFFERENT FROM MISTRAL-7B
+            # https://huggingface.co/mistralai/Mixtral-8x7B-v0.1/discussions/23
+            "sliding_window_size": None, # there is NO sliding window on Mixtral
+            # seems to stored in the checkpoint
+            "rope_theta": 1000000.0,
+
+            # MoE Specific
+            "do_moe_mlp": True,
+            "num_experts_per_tok": 2,
+            "num_local_experts": 8,
+            "router_aux_loss_coef": 0.02,
         }
     else:  # llama1, llama2, codellama
         args = {"num_layers": llama_s2layer[size],
@@ -413,6 +543,21 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
         vocab_file = tokenizer.vocab_file
         shutil.copy(vocab_file, token_path)
         print("Saved tokenizer.model in", token_path)
+    elif model_name == "mixtral":
+        tokenizer = None
+        if model_path is not None:
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(model_path, cache_dir=cache_dir)
+            except OSError:
+                warnings.warn(f"Model path {model_path} does not have a "
+                              "tokenizer, using default tokenizer instead")
+        if tokenizer is None:
+            tokenizer = AutoTokenizer.from_pretrained("mistralai/Mixtral-8x7B-v0.1",
+                                                       cache_dir=cache_dir)
+        token_path = out/"tokenizer.model"
+        vocab_file = tokenizer.vocab_file
+        shutil.copy(vocab_file, token_path)
+        print("Saved tokenizer.model in", token_path)
 
     print("Done")
 
@@ -420,7 +565,7 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
 if __name__ == "__main__":
     parser = ArgumentParser(description="Convert Huggingface llama or falcon weights to "
                                         "megatron-compatible weights")
-    parser.add_argument("model", choices={"falcon", "llama", "llama2", "codellama", "mistral"})
+    parser.add_argument("model", choices={"falcon", "llama", "llama2", "codellama", "mistral", "mixtral"})
     parser.add_argument("--size", default=7, choices={7, 13, 30, 34, 40, 65, 70}, type=int,
                         help="The size of the model")
     parser.add_argument("--out", type=Path,
@@ -442,6 +587,8 @@ if __name__ == "__main__":
         assert args.size in {7, 13, 34}
     elif args.model == "mistral":
         assert args.size in {7}
+    elif args.model == "mixtral":
+        assert args.size in {7} # It means 8x7B MoE
     else:
         assert args.size in {7, 13, 70}
 
