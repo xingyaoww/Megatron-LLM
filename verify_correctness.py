@@ -1,13 +1,13 @@
 import os
+import gc
 import json
 import warnings
 from pathlib import Path
 from typing import Optional
 
 import torch
-import llama
 from torch import nn
-from transformers import AutoModelForCausalLM, LlamaForCausalLM, LlamaTokenizer, MistralForCausalLM
+from transformers import AutoModelForCausalLM, LlamaForCausalLM, LlamaTokenizer, MistralForCausalLM, MixtralForCausalLM
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 
 from megatron import get_args, update_num_microbatches
@@ -21,6 +21,7 @@ from finetune import model_provider, extra_args, get_batch, loss_func, data_prov
 class Llama2Wrapper(nn.Module):
     def __init__(self, cache_dir):
         super().__init__()
+        import llama
         initialize_model_parallel(1)
         cache_dir = Path(cache_dir)
         checkpoints = sorted(cache_dir.glob("*.pth"))
@@ -50,7 +51,7 @@ def is_meta_llama2_path(path: Optional[Path]) -> bool:
 def hf_provider(name: str, cache_dir: Optional[Path], device: str,
                 size: int = 7, bf16: bool = False):
     print("Getting huggingface model...")
-    extra_kwargs = {}
+    extra_kwargs = {"device_map": "auto"} if device == "cuda" else {}
     if bf16:
         extra_kwargs = {"torch_dtype": torch.bfloat16}
     if name == "falcon":
@@ -89,8 +90,21 @@ def hf_provider(name: str, cache_dir: Optional[Path], device: str,
                 f"mistralai/Mistral-{size}B-v0.1", cache_dir=cache_dir,
                 **extra_kwargs
             )
+    elif name == "mixtral":
+        assert size == 7, "Mixtral only supports 7B model"
+        try:
+            model = MixtralForCausalLM.from_pretrained(cache_dir, **extra_kwargs)
+        except OSError:
+            print(f"Cache dir {cache_dir} does not look like a huggingface "
+                  "checkpoint, assuming cache_dir instead")
+            model = MixtralForCausalLM.from_pretrained(
+                f"mistralai/Mixtral-8x7B-v0.1", cache_dir=cache_dir,
+                **extra_kwargs
+            )
     else:
         raise KeyError(f"Model {name} not implemented")
+    if device == "cuda":
+        return model.eval().requires_grad_(False)  # don't need to move to device - it is automatically handled by huggingface accelerate
     return model.eval().requires_grad_(False).to(device)
 
 
@@ -113,8 +127,9 @@ def hf_forward(model, batch):
 def mega_provider(name: str):
     print("Getting megatron model...")
     model, _ , _ = _setup_model_and_optimizer(model_provider, name, args=get_args())
-    assert len(model) == 1, "correctness verification only supported with unsharded models"
-    model = model[0].eval().requires_grad_(False)
+    # assert len(model) == 1, "correctness verification only supported with unsharded models"
+    # model = model[0].eval().requires_grad_(False)
+    # if len(model) > 1:
     return model
 
 
@@ -149,13 +164,7 @@ def is_megatron_path(path: Path | str):
     path = Path(path) if isinstance(path, str) else path
     return (path/"latest_checkpointed_iteration.txt").exists()
 
-
-def main():
-    # Misc initializations
-    print("Starting megatron vs huggingface verification")
-    args = get_args()
-    set_jit_fusion_options(args)
-
+def verify_at_sametime(args):
     # Determine if the provided weight is a megatron checkpoint or huggingface checkpoint
     print("Loading our model!")
     if is_megatron_path(args.load):
@@ -188,7 +197,82 @@ def main():
         verify_step(our_forward, our_model, base_forward, base_model,
                     get_batch(data_iterator))
 
+def _run_baseline_model(batches, args):
+    print("Loading baseline model!")
+    base_model = hf_provider(args.model_name, args.cache_dir,
+                             args.baseline_device, size=args.model_size)
+    base_forward = hf_forward
 
+    baseline_logits = []
+    baseline_loss = []
+    for batch in batches:
+        logits, loss = base_forward(base_model, batch)
+        baseline_logits.append(logits.detach().cpu())
+        baseline_loss.append(loss.detach().cpu())
+    del base_model
+    gc.collect()
+    torch.cuda.empty_cache()
+    return baseline_logits, baseline_loss
+
+def verify_pipeline(args):
+    # first get data for 10 iterations
+    batches = []
+    print("Loading dataset!")
+    args.iteration = 0
+    data_iterator, _, _ = build_train_valid_test_data_iterators(
+        data_provider, args
+    )
+    for iteration in range(0, 10):
+        batches.append(get_batch(data_iterator))
+
+    # ==============================
+    # Load baseline model
+    baseline_logits, baseline_loss = _run_baseline_model(batches, args)
+
+    # ==============================
+    if is_megatron_path(args.load):
+        our_model = mega_provider(args.model_name)
+        our_forward = mega_forward
+    else:
+        print("NOTE: The given path does not look like a megatron checkpoint, "
+              f"assuming it's a huggingface checkpoint instead (path={args.load})")
+        our_model = hf_our_provider(args.model_name, args.load, "cuda:0", bf16=args.bf16)
+        our_forward = hf_forward
+        args.iteration = 0
+
+    # ==============================
+    for iteration in range(0, 10):
+        print(f"Iteration {iteration}...")
+        update_num_microbatches(args.consumed_train_samples)
+        args.curr_iteration = iteration
+
+        our_logits, our_loss = our_forward(our_model, batches[iteration])
+        our_logits = our_logits.cpu().detach()
+        our_loss = our_loss.cpu().detach()
+        base_logits = baseline_logits[iteration]
+        base_loss = baseline_loss[iteration]
+        assert our_logits.size() == base_logits.size(), \
+            f"ours={our_logits.size()}, true={base_logits.size()}"
+
+        abs_error = torch.abs(our_logits - base_logits)
+        print("Max absoulute error in the logits:",
+          f"max={torch.max(abs_error):.6f}, avg={torch.mean(abs_error):.6f}")
+        loss_error = torch.abs(our_loss - base_loss)
+        print(f"Abs loss error: {loss_error:.6f} "
+            f"Our loss: {our_loss:.3f}, theirs: {base_loss:.3f}")
+
+
+def main():
+    # Misc initializations
+    print("Starting megatron vs huggingface verification")
+    args = get_args()
+    set_jit_fusion_options(args)
+
+    if args.use_all_gpus:
+        verify_pipeline(args)
+    else:
+        print("Running verification at the same time")
+        verify_at_sametime(args)
 
 def extra_extra_args(parser):
     parser = extra_args(parser)
@@ -202,6 +286,7 @@ def extra_extra_args(parser):
     ))
     group.add_argument("--huggingface_device", default="cuda:1", dest="baseline_device",
                        help="Device to use for the baseline model")
+    group.add_argument("--use_all_gpus", action="store_true")
     group.add_argument("--model_size", type=int, default=7)
     return parser
 

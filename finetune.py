@@ -9,7 +9,7 @@ from megatron import get_args, get_tokenizer, get_timers, get_counters, print_ra
 from megatron.training import pretrain
 from megatron.core import tensor_parallel
 from megatron.core.parallel_state import get_data_parallel_group
-from megatron.model import GPTModel, ModelType, LlamaModel, FalconModel, MistralModel
+from megatron.model import GPTModel, ModelType, LlamaModel, FalconModel, MistralModel, MixtralModel
 from megatron.utils import get_ltor_masks_and_position_ids, average_losses_across_data_parallel_group
 from megatron.data.gpt_dataset import build_train_valid_test_datasets as gpt_build_datasets
 from megatron.data.instruction_dataset import instruction_collator
@@ -40,6 +40,8 @@ def model_provider(pre_process: bool = True, post_process: bool = True):
         if args.sliding_window_size != 4096:
             print_rank_0("Mistral uses sliding window attention (set sliding_window=4096)")
             args.sliding_window_size = 4096
+    elif args.model_name == "mixtral":
+        cls = MixtralModel
     else:
         raise KeyError(f"Unkown model {args.model_name}")
 
@@ -188,6 +190,63 @@ def loss_func(is_training, batch, outputs):
 
     return loss, out_dict
 
+# TODO: This is problematic, we include this solely for testing for now
+def load_balancing_loss_func(gate_logits: torch.Tensor, num_experts: torch.Tensor = None, top_k=2) -> float:
+    r"""
+    https://github.com/huggingface/transformers/blob/701298d2d3d5c7bde45e71cce12736098e3f05ef/src/transformers/models/mixtral/modeling_mixtral.py#L77C1-L119C38
+
+    Computes auxiliary load balancing loss as in Switch Transformer - implemented in Pytorch.
+
+    See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details. This function implements the loss
+    function presented in equations (4) - (6) of the paper. It aims at penalizing cases where the routing between
+    experts is too unbalanced.
+
+    Args:
+        gate_logits (Union[`torch.Tensor`, Tuple[torch.Tensor]):
+            Logits from the `gate`, should be a tuple of model.config.num_hidden_layers tensors of
+            shape [batch_size X sequence_length, num_experts].
+        num_experts (`int`, *optional*):
+            Number of experts
+
+    Returns:
+        The auxiliary loss.
+    """
+    if gate_logits is None or not isinstance(gate_logits, tuple):
+        return 0
+
+    if isinstance(gate_logits, tuple):
+        compute_device = gate_logits[0].device
+        concatenated_gate_logits = torch.cat([layer_gate.to(compute_device) for layer_gate in gate_logits], dim=0)
+
+    routing_weights = torch.nn.functional.softmax(concatenated_gate_logits, dim=-1)
+
+    _, selected_experts = torch.topk(routing_weights, top_k, dim=-1)
+
+    # treat `top_k` as tokens (shape is `top_k X [batch_size X sequence_length]`)
+    selected_experts = selected_experts.reshape(-1)
+
+    expert_mask = torch.nn.functional.one_hot(selected_experts, num_experts)
+    expert_mask = torch.max(expert_mask, dim=-2).values
+
+    # Compute the percentage of tokens routed to each experts
+    tokens_per_expert = torch.mean(expert_mask.float(), dim=0)
+
+    # Compute the average probability of routing to these experts
+    router_prob_per_expert = torch.mean(routing_weights, dim=0)
+
+    overall_loss = torch.sum(tokens_per_expert * router_prob_per_expert.unsqueeze(-1))
+    return overall_loss * num_experts
+
+def moe_loss_func(is_training, batch, outputs, args):
+    model_outputs, all_router_logits = outputs
+    loss, out_dict = loss_func(is_training, batch, model_outputs)
+    
+    # add aux loss
+    aux_loss = load_balancing_loss_func(all_router_logits, args.num_local_experts, args.num_experts_per_tok)
+    loss += args.router_aux_loss_coef * aux_loss
+    out_dict["aux loss"] = aux_loss
+    out_dict["total loss"] = loss
+    return loss, out_dict
 
 def forward_step(data_iterator, model):
     """Forward step."""
@@ -200,9 +259,13 @@ def forward_step(data_iterator, model):
     tokens, labels, loss_mask, attention_mask, position_ids = batch
     timers("batch-generator").stop()
 
-    output_tensor = model(tokens, position_ids, attention_mask,
+    model_output = model(tokens, position_ids, attention_mask,
                           labels=labels)
-    return output_tensor, partial(loss_func, model.training, batch)
+    if args.do_moe_mlp:
+        # model_output = ((losses, logits), all_router_logits)
+        return model_output, partial(moe_loss_func, model.training, batch, args)
+    else:    
+        return model_output, partial(loss_func, model.training, batch)
 
 
 ##
@@ -214,7 +277,7 @@ def extra_args(parser):
     """Text generation arguments."""
     group = parser.add_argument_group(title='validation set')
     group.add_argument("--model_name",
-                       choices={"gpt", "llama", "falcon", "llama2", "codellama", "mistral"},
+                       choices={"gpt", "llama", "falcon", "llama2", "codellama", "mistral", "mixtral"},
                        default="gpt")
     group.add_argument("--model_type", choices={"encoder_or_decoder", "encoder_and_decoder"},
                        default="encoder_or_decoder")
