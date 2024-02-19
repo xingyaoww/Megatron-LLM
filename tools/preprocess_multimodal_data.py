@@ -362,12 +362,14 @@ def main():
     else:
         fs = map(open, args.input)
 
+    output_jsonl = f"{args.output_prefix}.jsonl"
     with Pool(args.workers, initializer=encoder.initializer) as pool, \
             DatasetWriter(args.output_prefix, vocab_size, args.dataset_impl,
                           "text") as token_writer, \
             DatasetWriter(args.output_prefix, 16, args.dataset_impl,
                           "role") as role_writer, \
-            ImageDatasetWriter(args.output_prefix, "image_patch") as img_writer:
+            ImageDatasetWriter(args.output_prefix, "image_patch") as img_writer, \
+            open(output_jsonl, "w") as output_file:
 
         f = itertools.chain(*fs)
         docs = pool.imap(encoder.encode, f, args.chunk_size)
@@ -397,6 +399,11 @@ def main():
             token_writer.add_item(tokens)
             role_writer.add_item(roles)
             img_writer.add_item(image_patches)
+            stats = {
+                "n_tokens": len(tokens),
+                "n_image_tokens": len(list(map(lambda r: r == Role.image.value, roles)))
+            }
+            output_file.write(json.dumps(stats) + "\n")
 
             if i % args.log_interval == 0:
                 elapsed = time.time() - proc_start
