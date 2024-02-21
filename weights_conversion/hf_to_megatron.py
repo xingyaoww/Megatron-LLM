@@ -281,6 +281,17 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
                                                     trust_remote_code=True,
                                                     cache_dir=cache_dir)
         hf_weights = model.state_dict()
+    elif model_name == "mmistral":
+        # TODO: replace this with huggingface model
+        # model = AutoModelForCausalLM.from_pretrained(model_path,
+        #                                             trust_remote_code=True,
+        #                                             cache_dir=cache_dir)
+        # from scripts/model/modeling_mmistral.py
+        from scripts.model.modeling_mmistral import MultimodalMistralForCausalLM
+        model = MultimodalMistralForCausalLM.from_pretrained(model_path,
+                                                            trust_remote_code=True,
+                                                            cache_dir=cache_dir)
+        hf_weights = model.state_dict()
     else:
         print("Getting llama...")
         version = 2 if "2" in model_name else 1
