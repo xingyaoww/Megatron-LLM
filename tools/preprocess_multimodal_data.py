@@ -6,9 +6,10 @@ import time
 import itertools
 import numpy as np
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Iterable
 from multiprocessing import Pool
 from argparse import ArgumentParser, Namespace
+from tqdm import tqdm
 
 import torch
 
@@ -101,6 +102,7 @@ def load_base64_to_PILImage(base64_string: str) -> Image:
 #     return f"<|im_start|>{role}\n{message}<|im_end|>\n"
 MESSAGE_PREFIX = "<|im_start|>{role}\n"
 MESSAGE_SUFFIX = "<|im_end|>\n"
+NON_VISION_TOKEN = -1
 
 class Encoder(object):
     tokenizer: Optional[AbstractTokenizer] = None
@@ -125,7 +127,7 @@ class Encoder(object):
         # tokenize and get roles
         tokens = []
         roles = []
-        vision_patch_indices = [] # same shape as tokens, -1 for non-vision tokens
+        vision_patch_indices = [] # same shape as tokens, NON_VISION_TOKEN=-1 for non-vision tokens
         vision_patches = [] # list of C*PATCH_H*PATCH_W = 3*32*32 = 3072
 
         for turn in conversations:
@@ -137,14 +139,14 @@ class Encoder(object):
                 prefix_tokens = Encoder.tokenizer.tokenize(MESSAGE_PREFIX.format(role=role))
                 tokens += prefix_tokens
                 roles += [Role[role].value]*len(prefix_tokens)
-                vision_patch_indices += [-1]*len(tokenized_text)
+                vision_patch_indices += [NON_VISION_TOKEN]*len(tokenized_text)
 
             for item in turn["content"]:
                 if item["type"] == "text":
                     tokenized_text = Encoder.tokenizer.tokenize(item["text"])
                     tokens += tokenized_text
                     roles += [Role[role].value]*len(tokenized_text)
-                    vision_patch_indices += [-1]*len(tokenized_text)
+                    vision_patch_indices += [NON_VISION_TOKEN]*len(tokenized_text)
                 
                 elif item["type"] == "image_url":
                     # load image
@@ -159,15 +161,15 @@ class Encoder(object):
                     # -> (N_H_PATCHES, N_W_PATCHES, C, PATCH_H, PATCH_W)
                     n_patches = cur_vision_patches.shape[0] * cur_vision_patches.shape[1]
                     # flatten the patches -> (N_PATCHES, C*PATCH_H*PATCH_W)
-                    cur_vision_patches = cur_vision_patches.view(n_patches, -1)
+                    cur_vision_patches = cur_vision_patches.view(n_patches, NON_VISION_TOKEN)
 
                     # Update data
                     tokens += [Encoder.vision_start_token] \
                         + [Encoder.vision_patch_token for _ in range(n_patches)] + [Encoder.vision_end_token]
                     roles += [Role[role].value] + [Role.image.value] * n_patches + [Role[role].value]
                     
-                    vision_patch_indices += [-1] \
-                        + [len(vision_patches) + i for i in range(n_patches)] + [-1]
+                    vision_patch_indices += [NON_VISION_TOKEN] \
+                        + [len(vision_patches) + i for i in range(n_patches)] + [NON_VISION_TOKEN]
                     vision_patches.extend(cur_vision_patches.numpy())
 
                 else:
@@ -180,7 +182,7 @@ class Encoder(object):
 
         assert len(vision_patches) == len(list(filter(lambda r: r == Role.image.value, roles))), \
             "Number of image patches should be equal to the number of image tokens."
-        vision_patches = np.array(vision_patches)
+        # vision_patches = np.array(vision_patches)
         assert len(tokens) == len(vision_patch_indices)
         assert len(tokens) == len(roles)
         return len(line), tokens, roles, vision_patches, vision_patch_indices
@@ -297,53 +299,112 @@ def get_args():
     args.tensor_model_parallel_size = 1
     return args
 
-# def pack_docs(docs, tokenizer, max_seq_length):
-#     packed_docs = []
+def pack_docs(docs: Iterable, tokenizer, max_seq_length):
+    n_total_packed_doc = 0
+    n_total_tokens = 0
 
-#     current_pack_tokens = []
-#     current_pack_roles = []
-#     current_seq_length = 0
-#     current_size = 0
+    current_pack_tokens = []
+    current_pack_roles = []
+    current_pack_vision_patches = []
+    current_pack_vision_patch_indices = []
 
-#     for size, tokens, roles in docs:
-#         # Check if adding the current text (with separator) will exceed max_seq_length
-#         if current_seq_length + len(tokens) + 1 <= max_seq_length:
-#             if current_pack_tokens:  # not the first sentence in pack
-#                 current_pack_tokens.append(tokenizer.bos)
-#                 current_pack_roles.append(Role.PACK_SEP.value)
-#                 current_seq_length += 1
-#                 current_size += len(tokenizer._inv_special_tokens[tokenizer.bos])
+    current_seq_length = 0
+    current_size = 0
+    pbar = tqdm(desc="Packing documents")
+    for size, tokens, roles, vision_patches, vision_patch_indices in docs:
+        # Check if adding the current text (with separator) will exceed max_seq_length
+        if current_seq_length + len(tokens) + 1 <= max_seq_length:
+            if current_pack_tokens:  # not the first sentence in pack
+                # Add separator token
+                current_pack_tokens.append(tokenizer.bos)
+                current_pack_roles.append(Role.PACK_SEP.value)
+                current_pack_vision_patch_indices.append(NON_VISION_TOKEN)
+                
+                # increment `vision_patch_indices` by the number of existing visual patches in the pack
+                vision_patch_indices = [
+                    idx if idx == NON_VISION_TOKEN else idx + len(current_pack_vision_patches)
+                    for idx in vision_patch_indices
+                ]
 
-#             current_pack_tokens.extend(tokens)
-#             current_pack_roles.extend(roles)
-#             current_seq_length += len(tokens)
-#             current_size += size
-#         elif current_seq_length == 0:
-#             # The only possible reason for this is len(tokens) >= max_seq_length 
-#             assert len(current_pack_tokens) == len(current_pack_roles) == 0
-#             assert len(tokens) >= max_seq_length
-#             assert len(tokens) == len(roles)
-#             # We truncate the tokens to max_seq_length AND treat it as a single pack
-#             packed_docs.append((size, tokens[:max_seq_length], roles[:max_seq_length]))
-#         else:
-#             # Finish the current pack and start a new one
-#             assert len(current_pack_tokens) > 0
-#             assert len(current_pack_roles) > 0
-#             assert current_size > 0
-#             packed_docs.append((current_size, current_pack_tokens, current_pack_roles))
+                current_seq_length += 1
+                current_size += len(tokenizer._inv_special_tokens[tokenizer.bos])
 
-#             current_pack_tokens = tokens
-#             current_pack_roles = roles
-#             current_seq_length = len(tokens)
-#             current_size = size
+            current_pack_tokens.extend(tokens)
+            current_pack_roles.extend(roles)
+            current_pack_vision_patches.extend(vision_patches)
+            current_pack_vision_patch_indices.extend(vision_patch_indices)
 
-#     # Add any remaining packed sequences
-#     if current_pack_tokens:
-#         assert len(current_pack_tokens) > 0, "Should not have empty pack."
-#         packed_docs.append((current_size, current_pack_tokens, current_pack_roles))
+            current_seq_length += len(tokens)
+            current_size += size
+
+        elif current_seq_length == 0:
+            # The only possible reason for this is len(tokens) >= max_seq_length 
+            assert len(current_pack_tokens) == len(current_pack_roles) == 0
+            assert len(tokens) >= max_seq_length
+            assert len(tokens) == len(roles)
+            assert len(tokens) == len(vision_patch_indices)
+            # We truncate the tokens to max_seq_length AND treat it as a single pack
+            # packed_docs.append((size, tokens[:max_seq_length], roles[:max_seq_length]))
+            n_total_packed_doc += 1
+            n_total_tokens += len(current_pack_tokens)
+            yield (
+                size,
+                tokens[:max_seq_length],
+                roles[:max_seq_length],
+                vision_patches[:max_seq_length],
+                vision_patch_indices[:max_seq_length]
+            )
+
+        else:
+            # Finish the current pack and start a new one
+            assert len(current_pack_tokens) > 0
+            assert current_size > 0
+            assert len(current_pack_tokens) == len(current_pack_roles)
+            assert len(current_pack_tokens) == len(current_pack_vision_patch_indices)
+            # packed_docs.append((current_size, current_pack_tokens, current_pack_roles))
+            n_total_packed_doc += 1
+            n_total_tokens += len(current_pack_tokens)
+            yield (
+                current_size,
+                current_pack_tokens,
+                current_pack_roles,
+                current_pack_vision_patches,
+                current_pack_vision_patch_indices
+            )
+
+            current_pack_tokens = tokens
+            current_pack_roles = roles
+            current_pack_vision_patches = vision_patches
+            current_pack_vision_patch_indices = vision_patch_indices
+            
+            current_seq_length = len(tokens)
+            current_size = size
+        
+        pbar.update(1)
+        # add status update
+        pbar.set_postfix(
+            packed_docs=n_total_packed_doc,
+            packed_tokens=n_total_tokens
+        )
+    pbar.close()
+
+    # Add any remaining packed sequences
+    if current_pack_tokens:
+        assert len(current_pack_tokens) > 0, "Should not have empty pack."
+        assert len(current_pack_tokens) == len(current_pack_roles)
+        assert len(current_pack_tokens) == len(current_pack_vision_patch_indices)
+        # packed_docs.append((current_size, current_pack_tokens, current_pack_roles))
+        n_total_packed_doc += 1
+        n_total_tokens += len(current_pack_tokens)
+        yield (
+            current_size,
+            current_pack_tokens,
+            current_pack_roles,
+            current_pack_vision_patches,
+            current_pack_vision_patch_indices
+        )
     
-#     print(f"Packed {len(docs)} documents into {len(packed_docs)} documents.")
-#     return packed_docs
+    print(f"Packed {len(docs)} documents into {n_total_packed_doc} documents ({n_total_tokens} tokens)")
 
 
 def main():
@@ -383,11 +444,11 @@ def main():
         # encoder.initializer()
         # docs = [encoder.encode(i) for i in f]
 
-        # if args.do_packing:
-        #     # make sure it works when docs is a generator
-        #     print(f"Sorting loaded documents by length for efficient packing. This can be slow for large dataset.")
-        #     docs = sorted(docs, key=lambda x: len(x[1]), reverse=True)
-        #     docs = pack_docs(docs, tokenizer, args.max_seq_length)
+        if args.do_packing:
+            # make sure it works when docs is a generator
+            # print(f"Sorting loaded documents by length for efficient packing. This can be slow for large dataset.")
+            # docs = sorted(docs, key=lambda x: len(x[1]), reverse=True)
+            docs = pack_docs(docs, tokenizer, args.max_seq_length)
 
         startup_end = time.time()
         proc_start = time.time()
@@ -405,7 +466,7 @@ def main():
 
             token_writer.add_item(tokens)
             role_writer.add_item(roles)
-            vision_patches_writer.add_item(vision_patches)
+            vision_patches_writer.add_item(np.array(vision_patches))
             vision_patch_indices_writer.add_item(vision_patch_indices)
             stats = {
                 "n_tokens": len(tokens),
