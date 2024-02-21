@@ -111,13 +111,9 @@ class Encoder(object):
     def initializer(self):
         Encoder.tokenizer = build_tokenizer(self.args)
         
-        Encoder.image_start_token = Encoder.tokenizer.tokenize(self.args.image_start_token)
-        assert len(Encoder.image_start_token) == 1
-        Encoder.image_start_token = Encoder.image_start_token[0]
-        
-        Encoder.image_end_token = Encoder.tokenizer.tokenize(self.args.image_end_token)
-        assert len(Encoder.image_end_token) == 1
-        Encoder.image_end_token = Encoder.image_end_token[0]
+        Encoder.vision_start_token = Encoder.tokenizer.vocab[self.args.vision_start_token]
+        Encoder.vision_patch_token = Encoder.tokenizer.vocab[self.args.vision_patch_token]
+        Encoder.vision_end_token = Encoder.tokenizer.vocab[self.args.vision_end_token]
 
     def encode(self, line: str) -> tuple[int, list[int], list[int], np.ndarray]:
         # get data
@@ -129,7 +125,8 @@ class Encoder(object):
         # tokenize and get roles
         tokens = []
         roles = []
-        all_image_patches = [] # list of C*PATCH_H*PATCH_W = 3*32*32 = 3072
+        vision_patch_indices = [] # same shape as tokens, -1 for non-vision tokens
+        vision_patches = [] # list of C*PATCH_H*PATCH_W = 3*32*32 = 3072
 
         for turn in conversations:
             role = turn["role"]
@@ -140,13 +137,14 @@ class Encoder(object):
                 prefix_tokens = Encoder.tokenizer.tokenize(MESSAGE_PREFIX.format(role=role))
                 tokens += prefix_tokens
                 roles += [Role[role].value]*len(prefix_tokens)
+                vision_patch_indices += [-1]*len(tokenized_text)
 
-            # TODO: handle multimodal
             for item in turn["content"]:
                 if item["type"] == "text":
                     tokenized_text = Encoder.tokenizer.tokenize(item["text"])
                     tokens += tokenized_text
                     roles += [Role[role].value]*len(tokenized_text)
+                    vision_patch_indices += [-1]*len(tokenized_text)
                 
                 elif item["type"] == "image_url":
                     # load image
@@ -156,20 +154,22 @@ class Encoder(object):
                     width, height = img_pil.size
                     new_width, new_height = get_resize_output_image_size((width, height))
                     img_tensor = get_transform(new_height, new_width)(img_pil)
-                    img_patches = preprocess_image(img_tensor)
+                    cur_vision_patches = preprocess_image(img_tensor)
                     
                     # -> (N_H_PATCHES, N_W_PATCHES, C, PATCH_H, PATCH_W)
-                    n_patches = img_patches.shape[0] * img_patches.shape[1]
+                    n_patches = cur_vision_patches.shape[0] * cur_vision_patches.shape[1]
                     # flatten the patches -> (N_PATCHES, C*PATCH_H*PATCH_W)
-                    img_patches = img_patches.view(n_patches, -1)
+                    cur_vision_patches = cur_vision_patches.view(n_patches, -1)
 
-                    # assign patch_idx (after insertion) and insert patches
-                    patch_indices = [len(all_image_patches) + i for i in range(n_patches)]
-                    all_image_patches.extend(img_patches.numpy())
-                    # Add image tokens (use patch_idx to refer to the image patches)
-                    tokens += [Encoder.image_start_token] + patch_indices + [Encoder.image_end_token]
-                    # Set role of all patches to be role of 'image', except for the start token
+                    # Update data
+                    tokens += [Encoder.vision_start_token] \
+                        + [Encoder.vision_patch_token for _ in range(n_patches)] + [Encoder.vision_end_token]
                     roles += [Role[role].value] + [Role.image.value] * n_patches + [Role[role].value]
+                    
+                    vision_patch_indices += [-1] \
+                        + [len(vision_patches) + i for i in range(n_patches)] + [-1]
+                    vision_patches.extend(cur_vision_patches.numpy())
+
                 else:
                     raise ValueError(f"Unknown content type (only 'text' and 'image_url' are supported): {item['type']}")
 
@@ -178,10 +178,12 @@ class Encoder(object):
                 tokens += suffix_tokens
                 roles += [Role[role].value]*len(suffix_tokens)
 
-        assert len(all_image_patches) == len(list(filter(lambda r: r == Role.image.value, roles))), \
+        assert len(vision_patches) == len(list(filter(lambda r: r == Role.image.value, roles))), \
             "Number of image patches should be equal to the number of image tokens."
-        all_image_patches = np.array(all_image_patches)
-        return len(line), tokens, roles, all_image_patches
+        vision_patches = np.array(vision_patches)
+        assert len(tokens) == len(vision_patch_indices)
+        assert len(tokens) == len(roles)
+        return len(line), tokens, roles, vision_patches, vision_patch_indices
 
     @property
     def special_tokens(self) -> dict:
@@ -260,9 +262,11 @@ def get_args():
                        help='Chunk size assigned to each worker process')
     group.add_argument('--log_interval', type=int, default=100,
                        help='Interval between progress updates')
-    group.add_argument('--image_start_token', type=str, default='<image>',
+    group.add_argument('--vision_start_token', type=str, default='<vision>',
                        help='reserved token for image start')
-    group.add_argument('--image_end_token', type=str, default='</image>',
+    group.add_argument('--vision_patch_token', type=str, default='<vpatch>',
+                       help='reserved token for vision patch')
+    group.add_argument('--vision_end_token', type=str, default='</vision>',
                        help='reserved token for image end')
     group.add_argument('--vocab_extra_ids', type=int, default=0)
     group.add_argument('--vocab_extra_ids_list', type=str, default=None,
@@ -278,11 +282,6 @@ def get_args():
     args = parser.parse_args()
     args.keep_empty = False
 
-    if args.vocab_extra_ids_list is None:
-        args.vocab_extra_ids_list = f"{args.image_start_token},{args.image_end_token}"
-    else:
-        args.vocab_extra_ids_list += f",{args.image_start_token},{args.image_end_token}"
-    print(f"vocab_extra_ids_list: {args.vocab_extra_ids_list}")
 
     if args.do_packing:
         assert args.max_seq_length, "Must specify max_seq_length when packing documents."
@@ -354,6 +353,12 @@ def main():
     encoder = Encoder(args)
     tokenizer = build_tokenizer(args)
     vocab_size = tokenizer.vocab_size
+    
+    # These tokens should already in the tokenizer
+    assert args.vision_start_token in tokenizer.vocab
+    assert args.vision_patch_token in tokenizer.vocab
+    assert args.vision_end_token in tokenizer.vocab
+
 
     if ".gz" in "".join(args.input):
         import gzip
@@ -368,7 +373,9 @@ def main():
                           "text") as token_writer, \
             DatasetWriter(args.output_prefix, 16, args.dataset_impl,
                           "role") as role_writer, \
-            ImageDatasetWriter(args.output_prefix, "image_patch") as img_writer, \
+            ImageDatasetWriter(args.output_prefix, "vision_patch") as vision_patches_writer, \
+            DatasetWriter(args.output_prefix, None, args.dataset_impl,
+                          "vision_patch_indices") as vision_patch_indices_writer, \
             open(output_jsonl, "w") as output_file:
 
         f = itertools.chain(*fs)
@@ -387,7 +394,7 @@ def main():
         total_bytes_processed = 0
         print("Time to startup:", startup_end - startup_start)
 
-        for i, (size, tokens, roles, image_patches) in enumerate(docs, start=1):
+        for i, (size, tokens, roles, vision_patches, vision_patch_indices) in enumerate(docs, start=1):
             total_bytes_processed += size
             if len(tokens) == 0:
                 print("WARNING: Encountered empty document, skipping.")
@@ -398,7 +405,8 @@ def main():
 
             token_writer.add_item(tokens)
             role_writer.add_item(roles)
-            img_writer.add_item(image_patches)
+            vision_patches_writer.add_item(vision_patches)
+            vision_patch_indices_writer.add_item(vision_patch_indices)
             stats = {
                 "n_tokens": len(tokens),
                 "n_image_tokens": len(list(map(lambda r: r == Role.image.value, roles)))
