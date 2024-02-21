@@ -183,7 +183,8 @@ def llama_to_megatron(weights: dict, size: int, source: str = "meta",
 
 def mistral_to_megatron(
     weights: dict,
-    size: int
+    size: int,
+    multimodal: bool = False
 ) -> dict:
     assert size == 7
     def permute(qkv_w):
@@ -251,8 +252,11 @@ def mistral_to_megatron(
         del weights[f"{hf_prefix}.self_attn.k_proj.weight"]
         del weights[f"{hf_prefix}.self_attn.v_proj.weight"]
 
-    return {"embedding": embedding, "transformer": transformer,
+    ret = {"embedding": embedding, "transformer": transformer,
             "lm_head": lm_head}
+    if multimodal:
+        ret["embed_vision_patch"] = weights["model.embed_vision_patch.weight"]
+    return ret
 
 
 def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
@@ -288,6 +292,8 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
         megatron_weights = falcon_to_megatron(hf_weights, size)
     elif model_name == "mistral":
         megatron_weights = mistral_to_megatron(hf_weights, size)
+    elif model_name == "mmistral":
+        megatron_weights = mistral_to_megatron(hf_weights, size, multimodal=True)
     else:
         megatron_weights = llama_to_megatron(hf_weights, size, llama_source,
                                              version=1 if model_name == "llama" else 2)
@@ -306,7 +312,7 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
                      "hidden_dropout": 0.0,
                      "parallel_attn": True, "max_position_embeddings": 2048,
                      "seq_length": 2048})
-    elif model_name == "mistral":
+    elif model_name == "mistral" or model_name == "mmistral":
         assert size == 7
         # mistral-7b mostly uses the same args as llama-7b
         # https://huggingface.co/mistralai/Mistral-7B-v0.1/blob/main/config.json
@@ -330,6 +336,8 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
             "rope_theta": 10000.0,
             "sliding_window_size": 4096,
         }
+        if model_name == "mmistral":
+            args["vision_patch_size"] = 32
     else:  # llama1, llama2, codellama
         args = {"num_layers": llama_s2layer[size],
                 "hidden_size": llama_s2hidden[size],
@@ -398,7 +406,7 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
         vocab_file = tokenizer.vocab_file
         shutil.copy(vocab_file, token_path)
         print("Saved tokenizer.model in", token_path)
-    elif model_name == "mistral":
+    elif model_name == "mistral" or model_name == "mmistral":
         tokenizer = None
         if model_path is not None:
             try:
@@ -420,7 +428,7 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
 if __name__ == "__main__":
     parser = ArgumentParser(description="Convert Huggingface llama or falcon weights to "
                                         "megatron-compatible weights")
-    parser.add_argument("model", choices={"falcon", "llama", "llama2", "codellama", "mistral"})
+    parser.add_argument("model", choices={"falcon", "llama", "llama2", "codellama", "mistral", "mmistral"})
     parser.add_argument("--size", default=7, choices={7, 13, 30, 34, 40, 65, 70}, type=int,
                         help="The size of the model")
     parser.add_argument("--out", type=Path,
@@ -440,7 +448,7 @@ if __name__ == "__main__":
         assert args.size in {7, 13, 30, 65}
     elif args.model == "codellama":
         assert args.size in {7, 13, 34}
-    elif args.model == "mistral":
+    elif args.model == "mistral" or args.model == "mmistral":
         assert args.size in {7}
     else:
         assert args.size in {7, 13, 70}
