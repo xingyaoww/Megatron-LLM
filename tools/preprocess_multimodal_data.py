@@ -481,7 +481,7 @@ def main():
                 elapsed = time.time() - proc_start
                 mbs = total_bytes_processed/1024/1024/elapsed
                 print(f"Processed {i} documents ({i/elapsed} docs/s, {mbs} MB/s).")
-        print("Done! Now finalizing.")
+        print(f"Done processing {i} documents! Now finalizing.")
 
     for f in fs:
         f.close()
