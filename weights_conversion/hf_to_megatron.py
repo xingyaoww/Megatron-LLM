@@ -256,7 +256,10 @@ def mistral_to_megatron(
     ret = {"embedding": embedding, "transformer": transformer,
             "lm_head": lm_head}
     if multimodal:
-        ret["embed_vision_patch"] = weights["model.embed_vision_patch.weight"]
+        embed_vision_patch = {
+            "weight": weights["model.embed_vision_patch.weight"]
+        }
+        ret["embed_vision_patch"] = embed_vision_patch
     return ret
 
 
