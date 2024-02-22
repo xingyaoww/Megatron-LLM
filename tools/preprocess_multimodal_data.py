@@ -300,6 +300,7 @@ def get_args():
     return args
 
 def pack_docs(docs: Iterable, tokenizer, max_seq_length):
+    n_total_doc = 0
     n_total_packed_doc = 0
     n_total_tokens = 0
 
@@ -380,11 +381,13 @@ def pack_docs(docs: Iterable, tokenizer, max_seq_length):
             current_seq_length = len(tokens)
             current_size = size
         
+        n_total_doc += 1
         pbar.update(1)
         # add status update
         pbar.set_postfix(
-            packed_docs=n_total_packed_doc,
-            packed_tokens=n_total_tokens
+            n_total_doc=f"{n_total_doc:,}",
+            packed_docs=f"{n_total_packed_doc:,}",
+            packed_tokens=f"{n_total_tokens:,}"
         )
     pbar.close()
 
@@ -404,7 +407,7 @@ def pack_docs(docs: Iterable, tokenizer, max_seq_length):
             current_pack_vision_patch_indices
         )
     
-    print(f"Packed {len(docs)} documents into {n_total_packed_doc} documents ({n_total_tokens} tokens)")
+    print(f"Packed {n_total_doc} documents into {n_total_packed_doc} documents ({n_total_tokens} tokens)")
 
 
 def main():
