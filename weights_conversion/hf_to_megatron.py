@@ -36,6 +36,7 @@ stored therein will not be removed when the conversion succeeds.
 
 import re
 import sys
+import math
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -349,6 +350,8 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
         }
         if model_name == "multimodal_mistral":
             args["vision_patch_size"] = 32
+            # 32000 + 5 (reserved vision token) + 1024 (location tokens)
+            args["padded_vocab_size"] = math.ceil(33029 / 128) * 128
     else:  # llama1, llama2, codellama
         args = {"num_layers": llama_s2layer[size],
                 "hidden_size": llama_s2hidden[size],
