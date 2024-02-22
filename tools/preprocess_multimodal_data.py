@@ -115,6 +115,8 @@ class Encoder(object):
         
         Encoder.vision_start_token = Encoder.tokenizer.vocab[self.args.vision_start_token]
         Encoder.vision_patch_token = Encoder.tokenizer.vocab[self.args.vision_patch_token]
+        Encoder.vision_row_sep_token = Encoder.tokenizer.vocab[self.args.vision_row_sep_token]
+        Encoder.vision_frame_sep_token = Encoder.tokenizer.vocab[self.args.vision_frame_sep_token]
         Encoder.vision_end_token = Encoder.tokenizer.vocab[self.args.vision_end_token]
 
     def encode(self, line: str) -> tuple[int, list[int], list[int], np.ndarray]:
@@ -159,17 +161,31 @@ class Encoder(object):
                     cur_vision_patches = preprocess_image(img_tensor)
                     
                     # -> (N_H_PATCHES, N_W_PATCHES, C, PATCH_H, PATCH_W)
-                    n_patches = cur_vision_patches.shape[0] * cur_vision_patches.shape[1]
+                    n_h_patches, n_w_patches, c, patch_h, patch_w = cur_vision_patches.shape
+                    n_patches = n_h_patches * n_w_patches
                     # flatten the patches -> (N_PATCHES, C*PATCH_H*PATCH_W)
-                    cur_vision_patches = cur_vision_patches.view(n_patches, NON_VISION_TOKEN)
+                    cur_vision_patches = cur_vision_patches.view(n_patches, -1)
+
+                    # add separator tokens to patches per row
+                    dummy_vision_tokens = []
+                    dummy_roles = []
+                    cur_patch_indices = []
+                    for i in range(n_h_patches):
+                        for j in range(n_w_patches):
+                            if i != 0 and j == 0:  # when new row starts
+                                dummy_vision_tokens.append(Encoder.vision_row_sep_token)
+                                dummy_roles.append(Role[role].value)  # separator token has the same role as the image
+                                cur_patch_indices.append(NON_VISION_TOKEN)
+
+                            dummy_vision_tokens.append(Encoder.vision_patch_token)
+                            dummy_roles.append(Role.image.value)
+                            cur_patch_indices.append(len(vision_patches) + i * n_w_patches + j)
 
                     # Update data
-                    tokens += [Encoder.vision_start_token] \
-                        + [Encoder.vision_patch_token for _ in range(n_patches)] + [Encoder.vision_end_token]
-                    roles += [Role[role].value] + [Role.image.value] * n_patches + [Role[role].value]
+                    tokens += [Encoder.vision_start_token] + dummy_vision_tokens + [Encoder.vision_end_token]
+                    roles += [Role[role].value] + dummy_roles + [Role[role].value]
                     
-                    vision_patch_indices += [NON_VISION_TOKEN] \
-                        + [len(vision_patches) + i for i in range(n_patches)] + [NON_VISION_TOKEN]
+                    vision_patch_indices += [NON_VISION_TOKEN] + cur_patch_indices + [NON_VISION_TOKEN]
                     vision_patches.extend(cur_vision_patches.numpy())
 
                 else:
@@ -181,7 +197,7 @@ class Encoder(object):
                 roles += [Role[role].value]*len(suffix_tokens)
 
         assert len(vision_patches) == len(list(filter(lambda r: r == Role.image.value, roles))), \
-            "Number of image patches should be equal to the number of image tokens."
+            f"Number of image patches should be equal to the number of image tokens."
         # vision_patches = np.array(vision_patches)
         assert len(tokens) == len(vision_patch_indices)
         assert len(tokens) == len(roles)
@@ -264,12 +280,11 @@ def get_args():
                        help='Chunk size assigned to each worker process')
     group.add_argument('--log_interval', type=int, default=100,
                        help='Interval between progress updates')
-    group.add_argument('--vision_start_token', type=str, default='<vision>',
-                       help='reserved token for image start')
-    group.add_argument('--vision_patch_token', type=str, default='<vpatch>',
-                       help='reserved token for vision patch')
-    group.add_argument('--vision_end_token', type=str, default='</vision>',
-                       help='reserved token for image end')
+    group.add_argument('--vision_start_token', type=str, default='<vision>')
+    group.add_argument('--vision_patch_token', type=str, default='<vpatch>')
+    group.add_argument('--vision_row_sep_token', type=str, default='<vrow_sep>')
+    group.add_argument('--vision_frame_sep_token', type=str, default='<vframe_sep>')
+    group.add_argument('--vision_end_token', type=str, default='</vision>')
     group.add_argument('--vocab_extra_ids', type=int, default=0)
     group.add_argument('--vocab_extra_ids_list', type=str, default=None,
                        help='comma separated list of special vocab ids to add to the tokenizer')
@@ -421,6 +436,8 @@ def main():
     # These tokens should already in the tokenizer
     assert args.vision_start_token in tokenizer.vocab
     assert args.vision_patch_token in tokenizer.vocab
+    assert args.vision_row_sep_token in tokenizer.vocab
+    assert args.vision_frame_sep_token in tokenizer.vocab
     assert args.vision_end_token in tokenizer.vocab
 
 
