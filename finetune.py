@@ -9,7 +9,7 @@ from megatron import get_args, get_tokenizer, get_timers, get_counters, print_ra
 from megatron.training import pretrain
 from megatron.core import tensor_parallel
 from megatron.core.parallel_state import get_data_parallel_group
-from megatron.model import GPTModel, ModelType, LlamaModel, FalconModel, MistralModel
+from megatron.model import GPTModel, ModelType, LlamaModel, FalconModel, MistralModel, MultimodalMistralModel
 from megatron.utils import get_ltor_masks_and_position_ids, average_losses_across_data_parallel_group
 from megatron.data.gpt_dataset import build_train_valid_test_datasets as gpt_build_datasets
 from megatron.data.instruction_dataset import instruction_collator
@@ -39,6 +39,11 @@ def model_provider(pre_process: bool = True, post_process: bool = True):
         cls = MistralModel
         if args.sliding_window_size != 4096:
             print_rank_0("Mistral uses sliding window attention (set sliding_window=4096)")
+            args.sliding_window_size = 4096
+    elif args.model_name == "multimodal_mistral":
+        cls = MultimodalMistralModel
+        if args.sliding_window_size != 4096:
+            print_rank_0("MultimodalMistral uses sliding window attention (set sliding_window=4096)")
             args.sliding_window_size = 4096
     else:
         raise KeyError(f"Unkown model {args.model_name}")

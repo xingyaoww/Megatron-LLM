@@ -97,7 +97,7 @@ def _load_checkpoint(queue, args):
     if args.model_type == 'GPT':
         from pretrain_gpt import model_provider
         margs.model_type = ModelType.encoder_or_decoder
-    elif args.model_type in {"falcon", "llama", "llama2", "codellama", "mistral"}:
+    elif args.model_type in {"falcon", "llama", "llama2", "codellama", "mistral", "multimodal_mistral"}:
         from finetune import model_provider
         margs.model_name = args.model_type
         margs.model_type = ModelType.encoder_or_decoder
@@ -193,6 +193,7 @@ def _load_checkpoint(queue, args):
     md.tie_embed_logits = margs.tie_embed_logits
     md.params_dtype = margs.params_dtype
     md.sliding_window_size = margs.sliding_window_size
+    md.vision_patch_size = margs.vision_patch_size
     if margs.position_embedding_type == PositionEmbeddingType.absolute:
         md.position_embedding_type = "absolute"
     elif margs.position_embedding_type == PositionEmbeddingType.rotary:
@@ -237,6 +238,13 @@ def _load_checkpoint(queue, args):
 
         queue_put("lm_head", {"lm_head": torch.cat([models[tp_rank].language_model.lm_head.data
                                                     for tp_rank in range(tp_size)])})
+
+    if md.vision_patch_size is not None:
+        # pass along vision embed
+        queue_put("embed_vision_patch", {"embed_vision_patch": torch.cat([
+            models[tp_rank].language_model.embed_vision_patch.weight.data
+            for tp_rank in range(tp_size)
+        ])})
 
     total_layer_num = 0
     for pp_rank in range(pp_size):

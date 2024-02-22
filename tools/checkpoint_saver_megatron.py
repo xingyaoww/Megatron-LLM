@@ -254,6 +254,19 @@ def save_checkpoint(queue, args):
             print(f"lm_head shape {model.language_model.lm_head.shape}")
             model.language_model.lm_head.data.copy_(out_lm_head[tp_rank])
 
+    # Get vision embed, if available
+    if md.vision_patch_size is not None:
+        # pass along vision embed
+        embed_vision_patch = queue_get("embed_vision_patch").pop("embed_vision_patch")
+        out_embed_vision_patch = torch.chunk(
+            embed_vision_patch, args.target_tensor_parallel_size, dim=0
+        )
+        for tp_rank, model in enumerate(models):
+            print(f"embed_vision_patch shape {model.language_model.embed_vision_patch.weight.shape}")
+            print(f"out_embed_vision_patch shape {out_embed_vision_patch[tp_rank].shape}")
+            model.language_model.embed_vision_patch.weight.data.copy_(out_embed_vision_patch[tp_rank])
+
+
     # Transformer layers
     total_layer_num = 0
     for pp_rank in range(args.target_pipeline_parallel_size):

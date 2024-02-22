@@ -367,6 +367,8 @@ class TransformerLanguageModel(MegatronModule):
         self.add_pooler = add_pooler
         self.encoder_hidden_state = None
 
+        self.vision_patch_size = args.vision_patch_size
+
         s = args.max_position_embeddings
         ell = args.num_layers
         v = args.padded_vocab_size
@@ -392,6 +394,21 @@ class TransformerLanguageModel(MegatronModule):
                                        self.init_method,
                                        self.num_tokentypes)
             self._embedding_key = 'embedding'
+
+        # Is MultiModal Model
+        if self.vision_patch_size is not None:
+            world_size = megatron.core.mpu.get_tensor_model_parallel_world_size()
+            self.embed_vision_patch = megatron.core.tensor_parallel.ColumnParallelLinear(
+                self.vision_patch_size * self.vision_patch_size * 3,  # 32 * 32 * 3,
+                self.hidden_size,
+                bias=args.use_bias,
+                gather_output=False,
+                init_method=init_method,
+                skip_bias_add=True,
+                async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
+                **megatron.model.transformer._args_to_kwargs(args),
+                world_size=world_size)
+            self._embed_vision_patch_key = 'embed_vision_patch'
 
         # Transformer.
         # Encoder (usually set to True, False if part of an encoder-decoder
@@ -485,6 +502,29 @@ class TransformerLanguageModel(MegatronModule):
         else:
             raise Exception('Stage must have at least either encoder or decoder')
 
+    def get_vision_embeds(self, vision_patch_indices, vision_patches):
+        # === Handle vision patches ===
+        vision_embeds = self.embed_vision_patch(
+            vision_patches
+        )  # (n_patches, hidden_size)
+        vision_embeds = torch.cat(
+            [
+                vision_embeds,
+                torch.zeros(1, self.hidden_size).to(
+                    vision_embeds.device
+                ),  # add a dummy token (for text)
+            ],
+        )  # (n_patches + 1, hidden_size)
+        # arrange embeddings according to vision_patch_indices
+        # - text tokens are -1 (map to the dummy zero tensor)
+        # - vision tokens are 0~n_patches (map to the corresponding vision_embeds)
+        vision_embeds = vision_embeds[
+            vision_patch_indices
+        ]  # (batch_size, seq_length, hidden_size)
+
+        # vision_embeds should be added with inputs_embeds
+        return vision_embeds
+
     def forward(self, 
                 enc_input_ids, 
                 enc_position_ids, 
@@ -497,12 +537,21 @@ class TransformerLanguageModel(MegatronModule):
                 inference_params=None,
                 pooling_sequence_index=0,
                 enc_hidden_states=None, 
-                output_enc_hidden=False):
+                output_enc_hidden=False,
+                vision_patch_indices: torch.LongTensor = None,  # (batch_size, seq_length), "-1" for text token
+                vision_patches: torch.FloatTensor = None,  # (n_patches, 32 * 32 * 3)
+                ):
 
         # Encoder embedding.
         if self.pre_process:
             encoder_input = self.embedding(enc_input_ids, enc_position_ids,
                                            tokentype_ids=tokentype_ids)
+            if vision_patches is not None:
+                assert vision_patch_indices is not None
+                vision_embeds = self.get_vision_embeds(
+                    vision_patch_indices, vision_patches
+                )
+                encoder_input = encoder_input + vision_embeds
         else:
             encoder_input = None
 
@@ -537,6 +586,12 @@ class TransformerLanguageModel(MegatronModule):
         if self.pre_process:
             decoder_input = self.embedding(dec_input_ids,
                                            dec_position_ids)
+            if vision_patches is not None:
+                assert vision_patch_indices is not None
+                vision_embeds = self.get_vision_embeds(
+                    vision_patch_indices, vision_patches
+                )
+                encoder_input = encoder_input + vision_embeds
         else:
             decoder_input = None
 
@@ -561,6 +616,10 @@ class TransformerLanguageModel(MegatronModule):
             state_dict_[self._embedding_key] \
                 = self.embedding.state_dict_for_save_checkpoint(prefix=prefix,
                                                                 keep_vars=keep_vars)
+        if self.vision_patch_size is not None:
+            state_dict_[self._embed_vision_patch_key] \
+                = self.embed_vision_patch.state_dict(prefix=prefix,
+                                                     keep_vars=keep_vars)
         if self.add_encoder:
             state_dict_[self._encoder_key] \
                 = self.encoder.state_dict_for_save_checkpoint(prefix=prefix,
@@ -593,6 +652,18 @@ class TransformerLanguageModel(MegatronModule):
                     if '_embeddings' in key:
                         state_dict_[key] = state_dict[key]
             self.embedding.load_state_dict(state_dict_, strict=strict)
+
+            # Vision patch embedding.
+            if self.vision_patch_size is not None:
+                if self._embed_vision_patch_key in state_dict:
+                    state_dict_ = state_dict[self._embed_vision_patch_key]
+                else:
+                    # for backward compatibility.
+                    state_dict_ = {}
+                    for key in state_dict.keys():
+                        if 'embed_vision_patch' in key:
+                            state_dict_[key] = state_dict[key]
+                self.embed_vision_patch.load_state_dict(state_dict_, strict=strict)
 
         # Classifiaction head.
         if self.post_process and not self.tie_embed_logits:
