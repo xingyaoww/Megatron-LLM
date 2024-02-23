@@ -123,8 +123,15 @@ class Encoder(object):
         # get data
         assert Encoder.tokenizer is not None
         data = json.loads(line)
-        _id = data["id"]
-        conversations = data["conversations"]
+        # each line can be:
+        if isinstance(data, list):
+            # 1 conversations: [{"role": "human", "content": [{"type": "text", "text": "XXX"}]}]
+            conversations = data
+        else:
+            # 2 a dict with "id": {"id": "XXX", "conversations": [{"role": "human", "content": [{"type": "text", "text": "XXX"}]}]}
+            assert isinstance(data, dict), "Data must be a list or a dictionary."
+            # _id = data["id"]
+            conversations = data["conversations"]
         
         # tokenize and get roles
         tokens = []
