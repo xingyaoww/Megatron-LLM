@@ -654,18 +654,18 @@ class TransformerLanguageModel(MegatronModule):
 
             # handle the case when the model is loaded from a checkpoint
             # and the vocab size is smaller than the current padded vocab size
-            assert "word_embeddings.weight" in state_dict_
-            _state_dict_vocab_size = state_dict_["word_embeddings.weight"].shape[0]
-            _current_vocab_size = self.embedding.word_embeddings.weight.shape[0]
-            if _state_dict_vocab_size < _current_vocab_size:
-                # expand the state_dict to match the current vocab size
-                _state_dict_vocab = state_dict_["word_embeddings.weight"]
-                _state_dict_vocab = torch.cat([
-                    _state_dict_vocab,
-                    torch.zeros(_current_vocab_size - _state_dict_vocab_size, _state_dict_vocab.shape[1])
-                ], dim=0)
-                state_dict_["word_embeddings.weight"] = _state_dict_vocab
-                print(f"Expanded the state_dict 'word_embeddings.weight' to match the current padded vocab size: {_state_dict_vocab_size} -> {_current_vocab_size}")
+            if "word_embeddings.weight" in state_dict_:
+                _state_dict_vocab_size = state_dict_["word_embeddings.weight"].shape[0]
+                _current_vocab_size = self.embedding.word_embeddings.weight.shape[0]
+                if _state_dict_vocab_size < _current_vocab_size:
+                    # expand the state_dict to match the current vocab size
+                    _state_dict_vocab = state_dict_["word_embeddings.weight"]
+                    _state_dict_vocab = torch.cat([
+                        _state_dict_vocab,
+                        torch.zeros(_current_vocab_size - _state_dict_vocab_size, _state_dict_vocab.shape[1])
+                    ], dim=0)
+                    state_dict_["word_embeddings.weight"] = _state_dict_vocab
+                    print(f"Expanded the state_dict 'word_embeddings.weight' to match the current padded vocab size: {_state_dict_vocab_size} -> {_current_vocab_size}")
             self.embedding.load_state_dict(state_dict_, strict=strict)
 
             # Vision patch embedding.
