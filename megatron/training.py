@@ -155,7 +155,8 @@ def pretrain(args,
                                    iteration,
                                    process_non_loss_data_func,
                                    verbose=False,
-                                   args=args)
+                                   args=args,
+                                   test=False)
 
     if args.save and iteration != 0:
         save_checkpoint(iteration, model, optimizer, opt_param_scheduler)
@@ -166,7 +167,7 @@ def pretrain(args,
         evaluate_and_print_results(prefix, forward_step_func,
                                    test_data_iterator, model,
                                    0, process_non_loss_data_func,
-                                   verbose=True, args=args)
+                                   verbose=True, args=args, test=True)
 
 
 def _update_train_iters(args):
@@ -774,7 +775,9 @@ def evaluate(forward_step_func,
              data_iterator,
              model,
              process_non_loss_data_func,
-             verbose=False):
+             eval_iters,
+             verbose=False,
+    ):
     """Evaluation."""
     args = get_args()
 
@@ -786,11 +789,11 @@ def evaluate(forward_step_func,
 
     with torch.no_grad():
         iteration = 0
-        while iteration < args.eval_iters:
+        while iteration < eval_iters:
             iteration += 1
             if verbose and iteration % args.log_interval == 0:
                 print_rank_0('Evaluating iter {}/{}'.format(iteration,
-                                                            args.eval_iters))
+                                                            eval_iters))
 
             forward_backward_func = get_forward_backward_func()
             loss_dicts = forward_backward_func(
@@ -822,7 +825,7 @@ def evaluate(forward_step_func,
         model_module.train()
 
     for key in total_loss_dict:
-        total_loss_dict[key] /= args.eval_iters * get_num_microbatches()
+        total_loss_dict[key] /= eval_iters * get_num_microbatches()
     return total_loss_dict, collected_non_loss_data
 
 
@@ -831,13 +834,17 @@ def evaluate_and_print_results(prefix,
                                data_iterator, model,
                                iteration, process_non_loss_data_func,
                                verbose=False,
-                               args=None):
+                               args=None,
+                               test=False
+                               ):
     """Helper function to evaluate and dump results on screen."""
     writer = get_tensorboard_writer()
 
     total_loss_dict, collected_non_loss_data = evaluate(
         forward_step_func, data_iterator, model,
-        process_non_loss_data_func, verbose)
+        process_non_loss_data_func, 
+        eval_iters=args.valid_iters if not test else args.test_iters,
+        verbose=verbose)
     string = ' validation loss at {} | '.format(prefix)
     for key in total_loss_dict:
         string += '{} value: {:.6E} | '.format(key, total_loss_dict[key].item())
@@ -887,7 +894,7 @@ def build_train_valid_test_data_iterators(build_train_valid_test_datasets_provid
     if args.iteration > 0 and args.consumed_valid_samples == 0:
         if args.train_samples is None:
             args.consumed_valid_samples = (args.iteration // args.eval_interval) * \
-                args.eval_iters * args.global_batch_size
+                args.valid_iters * args.global_batch_size
 
     # Data loader only on rank 0 of each model parallel group.
     if mpu.get_tensor_model_parallel_rank() == 0:
@@ -896,11 +903,11 @@ def build_train_valid_test_data_iterators(build_train_valid_test_datasets_provid
             train_samples = args.train_samples
         else:
             train_samples = args.train_iters * args.global_batch_size
-        eval_iters = (args.train_iters // args.eval_interval + 1) * \
-                     args.eval_iters
-        test_iters = args.eval_iters
+        valid_iters = (args.train_iters // args.eval_interval + 1) * \
+                     args.valid_iters
+        test_iters = args.test_iters
         train_val_test_num_samples = [train_samples,
-                                      eval_iters * args.global_batch_size,
+                                      valid_iters * args.global_batch_size,
                                       test_iters * args.global_batch_size]
         print_rank_0(' > datasets target sizes (minimum size):')
         print_rank_0('    train:      {}'.format(train_val_test_num_samples[0]))
@@ -920,8 +927,8 @@ def build_train_valid_test_data_iterators(build_train_valid_test_datasets_provid
 
         # Flags to know if we need to do training/validation/testing.
         do_train = train_dataloader is not None and args.train_iters > 0
-        do_valid = valid_dataloader is not None and args.eval_iters > 0
-        do_test = test_dataloader is not None and args.eval_iters > 0
+        do_valid = valid_dataloader is not None and args.valid_iters > 0
+        do_test = test_dataloader is not None and args.test_iters > 0
         # Need to broadcast num_tokens and num_type_tokens.
         flags = torch.cuda.LongTensor(
             [int(do_train), int(do_valid), int(do_test)])

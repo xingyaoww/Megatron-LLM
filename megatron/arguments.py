@@ -888,9 +888,12 @@ def _add_distributed_args(parser):
 
 def _add_validation_args(parser):
     group = parser.add_argument_group(title='validation')
-    group.add_argument('--eval_iters', type=int, default=100,
+    group.add_argument('--valid_iters', type=int, default=100,
                        help='Number of iterations to run for evaluation'
-                       'validation/test for.')
+                       'validation for.')
+    group.add_argument('--test_iters', type=int, default=100,
+                       help='Number of iterations to run for evaluation'
+                       'test for.')
     group.add_argument('--eval_interval', type=int, default=1000,
                        help='Interval between running evaluation on '
                        'validation set.')
