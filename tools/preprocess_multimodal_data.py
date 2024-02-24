@@ -281,10 +281,12 @@ def get_args():
                        choices=['lazy', 'cached', 'mmap'])
 
     group = parser.add_argument_group(title='runtime')
-    group.add_argument('--workers', type=int, required=True,
+    group.add_argument('--workers', type=int, default=4,
                        help='Number of worker processes to launch')
-    group.add_argument('--chunk_size', type=int, required=True,
+    group.add_argument('--chunk_size', type=int, default=32,
                        help='Chunk size assigned to each worker process')
+    group.add_argument('--no_mp', action='store_true',
+                       help='Disable multiprocessing')
     group.add_argument('--log_interval', type=int, default=100,
                        help='Interval between progress updates')
     group.add_argument('--vision_start_token', type=str, default='<vision>')
@@ -456,8 +458,7 @@ def main():
         fs = map(open, args.input)
 
     output_jsonl = f"{args.output_prefix}.jsonl"
-    with Pool(args.workers, initializer=encoder.initializer) as pool, \
-            DatasetWriter(args.output_prefix, vocab_size, args.dataset_impl,
+    with DatasetWriter(args.output_prefix, vocab_size, args.dataset_impl,
                           "text") as token_writer, \
             DatasetWriter(args.output_prefix, 16, args.dataset_impl,
                           "role") as role_writer, \
@@ -467,9 +468,13 @@ def main():
             open(output_jsonl, "w") as output_file:
 
         f = itertools.chain(*fs)
-        docs = pool.imap(encoder.encode, f, args.chunk_size)
-        # encoder.initializer()
-        # docs = [encoder.encode(i) for i in f]
+        if not args.no_mp:
+            print(f"Using multiprocessing with {args.workers} workers.")
+            pool = Pool(args.workers, initializer=encoder.initializer)
+            docs = pool.imap(encoder.encode, f, args.chunk_size)
+        else:
+            encoder.initializer()
+            docs = (encoder.encode(i) for i in f)
 
         if args.do_packing:
             # make sure it works when docs is a generator
@@ -491,6 +496,13 @@ def main():
             assert len(tokens) == len(roles)
             assert len(tokens) > 0
 
+            if len(vision_patches) == 0:
+                # Add a dummy patch IF no vision patches are found
+                # This is to ensure that the MMAP in the training code works
+                vision_patches = [
+                    np.zeros((3, PATCH_SIZE, PATCH_SIZE), dtype=np.float32)
+                ]
+
             token_writer.add_item(tokens)
             role_writer.add_item(roles)
             vision_patches_writer.add_item(np.array(vision_patches))
@@ -507,9 +519,14 @@ def main():
                 print(f"Processed {i} documents ({i/elapsed} docs/s, {mbs} MB/s).")
         print(f"Done processing {i} documents! Now finalizing.")
 
+    Path(f"{args.output_prefix}_DONE").touch()
+
     for f in fs:
         f.close()
 
-
+    if not args.no_mp:
+        pool.close()
+        pool.join()
+    
 if __name__ == '__main__':
     main()
