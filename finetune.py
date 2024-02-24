@@ -14,6 +14,8 @@ from megatron.utils import get_ltor_masks_and_position_ids, average_losses_acros
 from megatron.data.gpt_dataset import build_train_valid_test_datasets as gpt_build_datasets
 from megatron.data.instruction_dataset import instruction_collator
 from megatron.data.instruction_dataset import build_train_valid_test_datasets as instruct_build_datasets
+from megatron.data.multimodal_instruction_dataset import build_train_valid_test_datasets as multimodal_instruct_build_datasets
+from megatron.data.multimodal_instruction_dataset import instruction_collator as multimodal_instruction_collator
 from megatron.initialize import initialize_megatron
 from megatron.metrics import MetricInput, get_metric
 
@@ -83,6 +85,9 @@ def get_batch(data_iterator):
     elif args.data_type == "instruction":
         keys = ["text", "attention_mask", "position_ids"]
         float_keys = ["loss_mask"]
+    elif args.data_type == "multimodal_instruction":
+        keys = ["text", "attention_mask", "position_ids", "vision_patch_indices"]
+        float_keys = ["loss_mask", "vision_patches"]
     else:
         raise KeyError(f"Unknown dataset type {args.data_type}")
 
@@ -131,15 +136,13 @@ def get_batch(data_iterator):
     position_ids = data_b["position_ids"].to(tokens.device)
     attention_mask = data_b["attention_mask"].to(tokens.device)
     loss_mask = data_b["loss_mask"].to(tokens.device)
-    # # Instruction dataset.
-    # # Heavily inspired by Andreas Köpf: https://github.com/andreaskoepf/epfl-megatron/tree/local_changes/
-    # attention_mask = data_b["attention_mask"][:, :-1]
-    # example_ids = data_b["example_ids"][:, :-1]
-    # attention_mask, position_ids = get_attention_mask_and_position_ids(
-    #     tokens, attention_mask, example_ids
-    # )
 
-    return tokens, labels, loss_mask, attention_mask, position_ids
+    if args.data_type == "instruction":
+        return tokens, labels, loss_mask, attention_mask, position_ids
+
+    vision_patch_indices = data_b["vision_patch_indices"].to(tokens.device)
+    vision_patches = data_b["vision_patches"].to(args.params_dtype).to(tokens.device)
+    return tokens, labels, loss_mask, attention_mask, position_ids, vision_patch_indices, vision_patches
 
 
 def data_provider(train_val_test_num_samples):
@@ -150,6 +153,8 @@ def data_provider(train_val_test_num_samples):
         builder = gpt_build_datasets
     elif args.data_type == "instruction":
         builder = instruct_build_datasets
+    elif args.data_type == "multimodal_instruction":
+        builder = multimodal_instruct_build_datasets
 
     print_rank_0("> building train, validation, and test datasets ...")
     train_ds, valid_ds, test_ds = builder(
@@ -202,11 +207,20 @@ def forward_step(data_iterator, model):
     # Get the batch.
     timers("batch-generator", log_level=2).start()
     batch = get_batch(data_iterator)
-    tokens, labels, loss_mask, attention_mask, position_ids = batch
-    timers("batch-generator").stop()
 
-    output_tensor = model(tokens, position_ids, attention_mask,
-                          labels=labels)
+    if args.data_type == "multimodal_instruction":
+        tokens, labels, loss_mask, attention_mask, position_ids, vision_patch_indices, vision_patches = batch
+        timers("batch-generator").stop()
+        output_tensor = model(tokens, position_ids, attention_mask,
+                              vision_patch_indices=vision_patch_indices,
+                              vision_patches=vision_patches,
+                              labels=labels)
+    else:
+        tokens, labels, loss_mask, attention_mask, position_ids = batch
+        timers("batch-generator").stop()
+        output_tensor = model(tokens, position_ids, attention_mask,
+                             labels=labels)
+
     return output_tensor, partial(loss_func, model.training, batch)
 
 
@@ -219,13 +233,13 @@ def extra_args(parser):
     """Text generation arguments."""
     group = parser.add_argument_group(title='validation set')
     group.add_argument("--model_name",
-                       choices={"gpt", "llama", "falcon", "llama2", "codellama", "mistral"},
+                       choices={"gpt", "llama", "falcon", "llama2", "codellama", "mistral", "multimodal_mistral"},
                        default="gpt")
     group.add_argument("--model_type", choices={"encoder_or_decoder", "encoder_and_decoder"},
                        default="encoder_or_decoder")
     group.add_argument("--loss_role", choices={"assistant", "user", "all"},
                        default="assistant")
-    group.add_argument("--data_type", choices={"gpt", "instruction"},
+    group.add_argument("--data_type", choices={"gpt", "instruction", "multimodal_instruction"},
                        default="gpt")
     group.add_argument("--log_learning_rate_to_tensorboard", type=bool, default=True)
     group.add_argument("--log_loss_scale_to_tensorboard", type=bool, default=True)
@@ -239,6 +253,16 @@ if __name__ == "__main__":
 
     if args.data_type == "gpt":
         collate_fn = None
+    elif args.data_type == "multimodal_instruction":
+        return_attention_mask_in_length = args.packed_input and args.use_flash_attn
+        collate_fn = partial(
+            multimodal_instruction_collator,
+            scalar_loss_mask=args.scalar_loss_mask,
+            return_attention_mask_in_length=return_attention_mask_in_length,
+            loss_role=args.loss_role,
+        )
+        print_rank_0(f"Loss role set to {args.loss_role} for multimodal-instruction dataset")
+        print_rank_0("NOTE: You can still use this for pre-training, as long as you set the loss role to 'assistant' for every token")
     else:
         return_attention_mask_in_length = args.packed_input and args.use_flash_attn
         collate_fn = partial(
@@ -246,6 +270,7 @@ if __name__ == "__main__":
             scalar_loss_mask=args.scalar_loss_mask,
             return_attention_mask_in_length=return_attention_mask_in_length,
             loss_role=args.loss_role,
+            vision_patch_size=args.vision_patch_size,
         )
         print_rank_0(f"Loss role set to {args.loss_role} for instruction dataset")
 

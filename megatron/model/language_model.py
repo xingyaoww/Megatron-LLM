@@ -366,6 +366,7 @@ class TransformerLanguageModel(MegatronModule):
         self.decoder_attn_mask_type = decoder_attn_mask_type
         self.add_pooler = add_pooler
         self.encoder_hidden_state = None
+        self.sequence_parallel = args.sequence_parallel
 
         self.vision_patch_size = args.vision_patch_size
 
@@ -398,15 +399,20 @@ class TransformerLanguageModel(MegatronModule):
         # Is MultiModal Model
         if self.vision_patch_size is not None:
             world_size = megatron.core.mpu.get_tensor_model_parallel_world_size()
+            extra_kwargs = megatron.model.transformer._args_to_kwargs(args)
+            # NOTE: we explicitly disable sequence_parallel_enabled for the vision patch embedding
+            # since the input to self.embed_vision_patch is NOT YET in sequence parallel format
+            extra_kwargs["sequence_parallel_enabled"] = False
+            # print(f"extra_kwargs: {extra_kwargs}")
             self.embed_vision_patch = megatron.core.tensor_parallel.ColumnParallelLinear(
                 self.vision_patch_size * self.vision_patch_size * 3,  # 32 * 32 * 3,
                 self.hidden_size,
                 bias=args.use_bias,
-                gather_output=False,
+                gather_output=True,
                 init_method=init_method,
                 skip_bias_add=True,
                 async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
-                **megatron.model.transformer._args_to_kwargs(args),
+                **extra_kwargs,
                 world_size=world_size)
             self._embed_vision_patch_key = 'embed_vision_patch'
 
@@ -504,25 +510,41 @@ class TransformerLanguageModel(MegatronModule):
 
     def get_vision_embeds(self, vision_patch_indices, vision_patches):
         # === Handle vision patches ===
-        vision_embeds = self.embed_vision_patch(
+        # print(f"vision_patch_indices: {vision_patch_indices.shape}")
+        # print(f"vision_patches: {vision_patches.shape}")
+        # add dummy dimension for vision_patches
+        vision_patches = vision_patches.unsqueeze(0)  # (1, n_patches, 32 * 32 * 3)
+        vision_embeds, _unused_bias = self.embed_vision_patch(
             vision_patches
-        )  # (n_patches, hidden_size)
+        )  # (1, n_patches, hidden_size)
+        # print(f"vision_embeds right after linear: {vision_embeds.dtype} {vision_embeds.shape}")
         vision_embeds = torch.cat(
             [
-                vision_embeds,
-                torch.zeros(1, self.hidden_size).to(
-                    vision_embeds.device
-                ),  # add a dummy token (for text)
+                vision_embeds.squeeze(0),
+                # add a dummy token (for text)
+                torch.zeros(1, vision_embeds.shape[-1], dtype=vision_embeds.dtype).to(vision_embeds.device),
             ],
         )  # (n_patches + 1, hidden_size)
+
         # arrange embeddings according to vision_patch_indices
         # - text tokens are -1 (map to the dummy zero tensor)
         # - vision tokens are 0~n_patches (map to the corresponding vision_embeds)
-        vision_embeds = vision_embeds[
-            vision_patch_indices
-        ]  # (batch_size, seq_length, hidden_size)
+        vision_embeds = vision_embeds[vision_patch_indices]  # (batch_size, seq_length, hidden_size)
+        # print(f"vision_embeds after selection: {vision_embeds.dtype} {vision_embeds.shape}")
 
-        # vision_embeds should be added with inputs_embeds
+        # Data format change to avoid explicit tranposes : [b s h] --> [s b h].
+        # This is required by sequence parallelism (check Embedding implementation)
+        vision_embeds = vision_embeds.transpose(0, 1).contiguous()
+        # print(f"vision_embeds after moving the seq_dim to 0: {vision_embeds.shape}")
+
+        # vision_embeds = tensor_parallel.gather_from_tensor_model_parallel_region(vision_embeds)
+        # print(f"vision_embeds: {vision_embeds.shape}")
+
+        if self.sequence_parallel:
+            # print(f"vision_embeds before scatter: {vision_embeds.shape}")
+            vision_embeds = tensor_parallel.scatter_to_sequence_parallel_region(vision_embeds)
+            # print(f"vision_embeds after scatter: {vision_embeds.shape}")
+
         return vision_embeds
 
     def forward(self, 
@@ -538,19 +560,25 @@ class TransformerLanguageModel(MegatronModule):
                 pooling_sequence_index=0,
                 enc_hidden_states=None, 
                 output_enc_hidden=False,
-                vision_patch_indices: torch.LongTensor = None,  # (batch_size, seq_length), "-1" for text token
-                vision_patches: torch.FloatTensor = None,  # (n_patches, 32 * 32 * 3)
+                vision_patch_indices=None,  # (batch_size, seq_length), "-1" for text token
+                vision_patches=None,  # (n_patches, 32 * 32 * 3)
                 ):
 
         # Encoder embedding.
         if self.pre_process:
+            # print(f"enc_input_ids: {enc_input_ids.shape}")
+            # print(f"enc_position_ids: {enc_position_ids.shape}")
             encoder_input = self.embedding(enc_input_ids, enc_position_ids,
                                            tokentype_ids=tokentype_ids)
+            # print(f"encoder_input: {encoder_input.shape}")
             if vision_patches is not None:
-                assert vision_patch_indices is not None
+                # assert vision_patch_indices is not None
+                # print(f"vision_patches dtype: {vision_patches.dtype}")
                 vision_embeds = self.get_vision_embeds(
                     vision_patch_indices, vision_patches
                 )
+                # print(f"vision_embeds dtype: {vision_embeds.dtype}")
+                # print(f"encoder_input dtype: {encoder_input.dtype}")
                 encoder_input = encoder_input + vision_embeds
         else:
             encoder_input = None

@@ -82,13 +82,19 @@ class GPTModel(MegatronModule):
         self.language_model.set_input_tensor(input_tensor)
 
     def forward(self, input_ids, position_ids, attention_mask, labels=None,
-                tokentype_ids=None, inference_params=None):
+                tokentype_ids=None, inference_params=None,
+                vision_patch_indices: torch.LongTensor = None,  # (batch_size, seq_length), "-1" for text token
+                vision_patches: torch.FloatTensor = None,  # (n_patches, 32 * 32 * 3)
+                ):
 
         lm_output = self.language_model(
             input_ids,
             position_ids,
             attention_mask,
-            inference_params=inference_params)
+            inference_params=inference_params,
+            vision_patch_indices=vision_patch_indices,
+            vision_patches=vision_patches,
+        )
 
         if self.post_process:
             return post_language_model_processing(

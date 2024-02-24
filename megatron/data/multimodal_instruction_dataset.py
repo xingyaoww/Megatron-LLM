@@ -166,6 +166,11 @@ def get_indexed_datasets_(data_prefix: str, data_impl: str,
     indices = np.arange(start=0, stop=num_docs, step=1, dtype=np.int32)
     n_tokens = np.sum(indexed_text.sizes[indices])
     print_rank_0("    number of tokens: {}".format(n_tokens))
+    n_patch_indices = np.sum(indexed_vision_patch_indices.sizes[indices])
+    print_rank_0("    number of vision patch indices (should be the same as # tokens): {}".format(n_patch_indices))
+    n_patches = np.sum(indexed_vision_patch.sizes[indices]) // (32 * 32 * 3)
+    print_rank_0("    number of vision patches: {}".format(n_patches))
+
     return {"text": indexed_text, "role": indexed_role, "vision_patch": indexed_vision_patch, "vision_patch_indices": indexed_vision_patch_indices}
 
 
@@ -399,6 +404,7 @@ def instruction_collator(
     scalar_loss_mask=0.0,
     return_attention_mask_in_length: bool = False,
     loss_role: str = "assistant",
+    vision_patch_size: int = 32,
 ):
     assert loss_role in ["assistant", "user", "all"]
     args = get_args()
@@ -413,9 +419,12 @@ def instruction_collator(
 
     # pad data to seq_len, create attention mask
     batch_size = len(data)
+    # INPUTS
     attention_mask = torch.ones((batch_size, seq_len), dtype=torch.long)
     role = torch.full_like(attention_mask, -1)
     input = torch.full_like(attention_mask, pad_id)
+    vision_patch_indices = torch.full_like(attention_mask, -1)
+    vision_patches = [] # list of vision patches (this is dynamic, so we can't use torch.full_like)
 
     # For loss and example segmentation
     # 1 means optimize loss, 0 means no loss
@@ -428,16 +437,43 @@ def instruction_collator(
     for i, x in enumerate(data):
         t = x["text"]
         r = x["role"]
-        l = len(t)
-        # TODO: collate
+        # print(f"batch {i} text shape", t.shape)
+        # text shape (32723,)
+        cur_vision_patch_indices = x["vision_patch_indices"]
+        # vision_patch shape (59006976,)
+        cur_vision_patch = x["vision_patch"].reshape(
+            -1,
+            vision_patch_size * vision_patch_size * 3
+        )
+        # print("cur_vision_patch_indices shape", cur_vision_patch_indices.shape)
 
+        l = len(t)
+
+        # Increment cur_vision_patch_indices by the number of vision patches already seen
+        # since we are appending vision patches to a list
+        cur_vision_patch_indices += len(vision_patches)
+        
+        # print("seq_len", seq_len)
+        # print("token len", l)
         if l < seq_len:
             attention_mask[i, l:] = 0
             input[i, :l] = torch.from_numpy(t)
             role[i, :l] = torch.from_numpy(r)
+            vision_patch_indices[i, :l] = torch.from_numpy(cur_vision_patch_indices)
         else:
             input[i] = torch.from_numpy(t[:seq_len])
             role[i] = torch.from_numpy(r[:seq_len])
+
+            vision_patch_indices[i] = torch.from_numpy(cur_vision_patch_indices[:seq_len])
+            # # find value in cur_vision_patch_indices[:seq_len] that are not -1
+            # # and use that to index into cur_vision_patch
+            # indices_non_0 = torch.where(cur_vision_patch_indices != -1)
+            # patch_indices_kept = cur_vision_patch_indices[indices_non_0]
+            # vision_patches.extend(cur_vision_patch[indices])
+            
+        # note: we just append everything for simplicity
+        # since the dataset are pre-packed, so it less likely to waste memory
+        vision_patches.extend(cur_vision_patch)
 
         # Segmentation for packed sequences
         current_example_id = 0
@@ -486,6 +522,17 @@ def instruction_collator(
     # convert to torch.int64
     attention_mask = attention_mask.to(torch.int64)
     loss_mask = loss_mask[:, :-1]
+    vision_patch_indices = vision_patch_indices[:, :-1]
+    # aggregate vision patches
+    vision_patches = torch.tensor(np.array(vision_patches), dtype=torch.float32)
+    vision_patches = vision_patches.view(-1, vision_patch_size * vision_patch_size * 3)
+
+    # print("vision_patches shape", vision_patches.shape)
+    # print("vision_patch_indices shape", vision_patch_indices.shape)
+    # print("attention_mask shape", attention_mask.shape)
+    # print("position_ids shape", position_ids.shape)
+    # print("vision_patches", vision_patches)
+    # print("vision_patch_indices", vision_patch_indices)
     
     return {
         "text": input,
@@ -493,4 +540,6 @@ def instruction_collator(
             else attention_mask_in_length,
         "loss_mask": loss_mask,
         "position_ids": position_ids,
+        "vision_patch_indices": vision_patch_indices,
+        "vision_patches": vision_patches,
     }
