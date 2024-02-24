@@ -11,8 +11,13 @@ from megatron.core.tensor_parallel import vocab_parallel_max_indices
 class MetricInput:
     def __init__(self, batch: tuple, output: torch.Tensor, loss: torch.Tensor):
         # regular parameters
-        (self.tokens, self.labels, self.loss_mask, self.attention_mask,
-         self.position_ids) = batch
+        if len(batch) == 5:
+            (self.tokens, self.labels, self.loss_mask, self.attention_mask,
+            self.position_ids) = batch
+        else:
+            assert len(batch) == 7
+            (self.tokens, self.labels, self.loss_mask, self.attention_mask, 
+             self.position_ids, self.vision_patch_indices, self.vision_patches) = batch
         self.output = output
         self.loss = loss
         # lazy parameters
