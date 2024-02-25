@@ -193,7 +193,7 @@ class Encoder(object):
                     roles += [Role[role].value] + dummy_roles + [Role[role].value]
                     
                     vision_patch_indices += [NON_VISION_TOKEN] + cur_patch_indices + [NON_VISION_TOKEN]
-                    vision_patches.extend(cur_vision_patches.numpy())
+                    vision_patches.extend(cur_vision_patches.numpy().astype(np.float16))
 
                 else:
                     raise ValueError(f"Unknown content type (only 'text' and 'image_url' are supported): {item['type']}")
@@ -238,17 +238,17 @@ class DatasetWriter:
 
 class ImageDatasetWriter:
     def __init__(self, prefix: str, feature: str = "image_patch"):
-        self.bin_fname = f"{prefix}-{feature}.bin"
+        self.bin_fname = f"{prefix}-{feature}.bin.lz4" # SAVE AS LZ4
         self.idx_fname = f"{prefix}-{feature}.idx"
         self.builder = None
 
-    def add_item(self, tokens: list[np.ndarray]):
-        self.builder.add_item(torch.FloatTensor(tokens))
+    def add_item(self, list_of_image_patches: list[np.ndarray]):
+        self.builder.add_item(torch.HalfTensor(list_of_image_patches))
 
     def __enter__(self):
         self.builder = MMapIndexedDatasetBuilder(
             self.bin_fname,
-            dtype=np.float32
+            dtype=np.float16,
         )
         return self
 
