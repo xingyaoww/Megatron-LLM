@@ -10,7 +10,7 @@ from typing import Optional, Iterable
 from multiprocessing import Pool
 from argparse import ArgumentParser, Namespace
 from tqdm import tqdm
-
+from collections import defaultdict
 import torch
 
 sys.path.append(str(Path(__file__).parent.parent.absolute()))
@@ -145,6 +145,7 @@ class Encoder(object):
         roles = []
         vision_patch_indices = [] # same shape as tokens, NON_VISION_TOKEN=-1 for non-vision tokens
         vision_patches = [] # list of C*PATCH_H*PATCH_W = 3*32*32 = 3072
+        n_images = 0
 
         for turn in conversations:
             role = turn["role"]
@@ -179,6 +180,7 @@ class Encoder(object):
                     n_patches = n_h_patches * n_w_patches
                     # flatten the patches -> (N_PATCHES, C*PATCH_H*PATCH_W)
                     cur_vision_patches = cur_vision_patches.view(n_patches, -1)
+                    n_images += 1
 
                     # add separator tokens to patches per row
                     dummy_vision_tokens = []
@@ -215,7 +217,7 @@ class Encoder(object):
         # vision_patches = np.array(vision_patches)
         assert len(tokens) == len(vision_patch_indices)
         assert len(tokens) == len(roles)
-        return len(line), tokens, roles, vision_patches, vision_patch_indices
+        return len(line), tokens, roles, vision_patches, vision_patch_indices, n_images
 
     @property
     def special_tokens(self) -> dict:
@@ -330,20 +332,20 @@ def get_args():
     args.tensor_model_parallel_size = 1
     return args
 
-def pack_docs(docs: Iterable, tokenizer, max_seq_length):
-    n_total_doc = 0
-    n_total_packed_doc = 0
-    n_total_tokens = 0
-
+def pack_docs(docs: Iterable, tokenizer, max_seq_length, stats_counter, keep_data_after_truncation=True):
     current_pack_tokens = []
     current_pack_roles = []
     current_pack_vision_patches = []
     current_pack_vision_patch_indices = []
 
+    current_pack_n_images = 0
     current_seq_length = 0
     current_size = 0
     pbar = tqdm(desc="Packing documents")
-    for size, tokens, roles, vision_patches, vision_patch_indices in docs:
+    for size, tokens, roles, vision_patches, vision_patch_indices, n_images in docs:
+
+        stats_counter["n_images"] += n_images
+
         # Check if adding the current text (with separator) will exceed max_seq_length
         if current_seq_length + len(tokens) + 1 <= max_seq_length:
             if current_pack_tokens:  # not the first sentence in pack
@@ -366,6 +368,7 @@ def pack_docs(docs: Iterable, tokenizer, max_seq_length):
             current_pack_vision_patches.extend(vision_patches)
             current_pack_vision_patch_indices.extend(vision_patch_indices)
 
+            current_pack_n_images += n_images
             current_seq_length += len(tokens)
             current_size += size
 
@@ -377,15 +380,27 @@ def pack_docs(docs: Iterable, tokenizer, max_seq_length):
             assert len(tokens) == len(vision_patch_indices)
             # We truncate the tokens to max_seq_length AND treat it as a single pack
             # packed_docs.append((size, tokens[:max_seq_length], roles[:max_seq_length]))
-            n_total_packed_doc += 1
-            n_total_tokens += len(current_pack_tokens)
+            stats_counter["n_total_packed_doc"] += 1
+            stats_counter["n_total_tokens"] += len(current_pack_tokens)
             yield (
                 size,
                 tokens[:max_seq_length],
                 roles[:max_seq_length],
-                vision_patches[:max_seq_length],
-                vision_patch_indices[:max_seq_length]
+                vision_patches, # no need to truncate vision patches since it is indexed by vision_patch_indices
+                vision_patch_indices[:max_seq_length],
+                n_images * (max_seq_length / len(tokens)) # use fraction of images to approximate the number of images
             )
+
+            if keep_data_after_truncation:
+                # Put the remaining tokens into the next pack
+                current_pack_tokens = tokens[max_seq_length:]
+                current_pack_roles = roles[max_seq_length:]
+                current_pack_vision_patches = vision_patches # no need to truncate vision patches
+                current_pack_vision_patch_indices = vision_patch_indices[max_seq_length:]
+
+                current_pack_n_images = n_images * (len(current_pack_tokens) / len(tokens)) # use fraction of images to approximate the number of images
+                current_seq_length = len(current_pack_tokens)
+                current_size = size * (len(current_pack_tokens) / len(tokens))
 
         else:
             # Finish the current pack and start a new one
@@ -394,14 +409,15 @@ def pack_docs(docs: Iterable, tokenizer, max_seq_length):
             assert len(current_pack_tokens) == len(current_pack_roles)
             assert len(current_pack_tokens) == len(current_pack_vision_patch_indices)
             # packed_docs.append((current_size, current_pack_tokens, current_pack_roles))
-            n_total_packed_doc += 1
-            n_total_tokens += len(current_pack_tokens)
+            stats_counter["n_total_packed_doc"] += 1
+            stats_counter["n_total_tokens"] += len(current_pack_tokens)
             yield (
                 current_size,
                 current_pack_tokens,
                 current_pack_roles,
                 current_pack_vision_patches,
-                current_pack_vision_patch_indices
+                current_pack_vision_patch_indices,
+                current_pack_n_images
             )
 
             current_pack_tokens = tokens
@@ -409,17 +425,14 @@ def pack_docs(docs: Iterable, tokenizer, max_seq_length):
             current_pack_vision_patches = vision_patches
             current_pack_vision_patch_indices = vision_patch_indices
             
+            current_pack_n_images = n_images
             current_seq_length = len(tokens)
             current_size = size
         
-        n_total_doc += 1
+        stats_counter["n_total_doc"] += 1
         pbar.update(1)
         # add status update
-        pbar.set_postfix(
-            n_total_doc=f"{n_total_doc:,}",
-            packed_docs=f"{n_total_packed_doc:,}",
-            packed_tokens=f"{n_total_tokens:,}"
-        )
+        pbar.set_postfix(stats_counter)
     pbar.close()
 
     # Add any remaining packed sequences
@@ -487,18 +500,20 @@ def main():
             encoder.initializer()
             docs = (encoder.encode(i) for i in f)
 
+        stats_counter = defaultdict(int)
         if args.do_packing:
             # make sure it works when docs is a generator
             # print(f"Sorting loaded documents by length for efficient packing. This can be slow for large dataset.")
             # docs = sorted(docs, key=lambda x: len(x[1]), reverse=True)
-            docs = pack_docs(docs, tokenizer, args.max_seq_length)
+            docs = pack_docs(docs, tokenizer, args.max_seq_length, stats_counter)
 
         startup_end = time.time()
         proc_start = time.time()
         total_bytes_processed = 0
         print("Time to startup:", startup_end - startup_start)
 
-        for i, (size, tokens, roles, vision_patches, vision_patch_indices) in enumerate(docs, start=1):
+        for i, content in enumerate(docs, start=1):
+            (size, tokens, roles, vision_patches, vision_patch_indices, n_images) = content
             total_bytes_processed += size
             if len(tokens) == 0:
                 print("WARNING: Encountered empty document, skipping.")
@@ -520,7 +535,8 @@ def main():
             vision_patch_indices_writer.add_item(vision_patch_indices)
             stats = {
                 "n_tokens": len(tokens),
-                "n_image_tokens": sum(list(map(lambda r: r == Role.image.value, roles)))
+                "n_image_tokens": sum(list(map(lambda r: r == Role.image.value, roles))),
+                "n_images": n_images,
             }
             output_file.write(json.dumps(stats) + "\n")
 
@@ -530,6 +546,17 @@ def main():
                 print(f"Processed {i} documents ({i/elapsed} docs/s, {mbs} MB/s).")
         print(f"Done processing {i} documents! Now finalizing.")
 
+    # Save stats
+    with open(f"{args.output_prefix}_stats.json", "w") as stats_file:
+        stats = dict(
+            total_bytes_processed=total_bytes_processed,
+            total_docs_processed=i,
+            total_time=time.time() - startup_start,
+            total_time_startup=startup_end - startup_start,
+            total_time_processing=time.time() - proc_start,
+            **stats_counter
+        )
+        stats_file.write(json.dumps(stats))
     Path(f"{args.output_prefix}_DONE").touch()
 
     for f in fs:
