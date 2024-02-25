@@ -122,17 +122,24 @@ class Encoder(object):
     def encode(self, line: str) -> tuple[int, list[int], list[int], np.ndarray]:
         # get data
         assert Encoder.tokenizer is not None
+
         data = json.loads(line)
+
         # each line can be:
         if isinstance(data, list):
             # 1 conversations: [{"role": "human", "content": [{"type": "text", "text": "XXX"}]}]
             conversations = data
-        else:
+        elif isinstance(data, dict) and "conversations" in data:
             # 2 a dict with "id": {"id": "XXX", "conversations": [{"role": "human", "content": [{"type": "text", "text": "XXX"}]}]}
             assert isinstance(data, dict), "Data must be a list or a dictionary."
             # _id = data["id"]
             conversations = data["conversations"]
-        
+        elif isinstance(data, dict) and "content" in data and "role" in data:
+            # 3 a dict with {"role": "human", "content": [{"type": "text", "text": "XXX"}]}
+            conversations = [data]
+        else:
+            raise ValueError(f"Unknown data format: {data}")
+
         # tokenize and get roles
         tokens = []
         roles = []
@@ -454,6 +461,10 @@ def main():
         import gzip
         fs = map(gzip.open, args.input)
         print(f"Detected .gz file(s), will use gzip.open to read them.")
+    elif ".lz4" in "".join(args.input):
+        import lz4.frame
+        fs = map(lz4.frame.open, args.input)
+        print(f"Detected .lz4 file(s), will use lz4.frame.open to read them.")
     else:
         fs = map(open, args.input)
 
