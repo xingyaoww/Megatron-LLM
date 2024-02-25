@@ -441,17 +441,18 @@ def pack_docs(docs: Iterable, tokenizer, max_seq_length, stats_counter, keep_dat
         assert len(current_pack_tokens) == len(current_pack_roles)
         assert len(current_pack_tokens) == len(current_pack_vision_patch_indices)
         # packed_docs.append((current_size, current_pack_tokens, current_pack_roles))
-        n_total_packed_doc += 1
-        n_total_tokens += len(current_pack_tokens)
+        stats_counter["n_total_packed_doc"] += 1
+        stats_counter["n_total_tokens"] += len(current_pack_tokens)
         yield (
             current_size,
             current_pack_tokens,
             current_pack_roles,
             current_pack_vision_patches,
-            current_pack_vision_patch_indices
+            current_pack_vision_patch_indices,
+            current_pack_n_images
         )
     
-    print(f"Packed {n_total_doc} documents into {n_total_packed_doc} documents ({n_total_tokens} tokens)")
+    print(f"Packed {stats_counter['n_total_doc']} documents into {stats_counter['n_total_packed_doc']} documents ({stats_counter['n_total_tokens']} tokens)")
 
 
 def main():
