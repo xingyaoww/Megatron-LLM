@@ -7,6 +7,7 @@ import math
 import sys
 import time
 from typing import Callable
+from tqdm import tqdm
 
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
@@ -154,7 +155,7 @@ def pretrain(args,
                                    model,
                                    iteration,
                                    process_non_loss_data_func,
-                                   verbose=False,
+                                   verbose=True,
                                    args=args,
                                    test=False)
 
@@ -718,7 +719,7 @@ def _train(args, forward_step_func,
             evaluate_and_print_results(prefix, forward_step_func,
                                        valid_data_iterator, model,
                                        iteration, process_non_loss_data_func,
-                                       verbose=False, args=args)
+                                       verbose=True, args=args)
             counters['tokens'] = current_tokens
 
 
@@ -788,12 +789,13 @@ def evaluate(forward_step_func,
     total_loss_dict = {}
 
     with torch.no_grad():
+        pbar = tqdm(total=eval_iters, desc='Evaluating', disable=not verbose)
         iteration = 0
         while iteration < eval_iters:
             iteration += 1
-            if verbose and iteration % args.log_interval == 0:
-                print_rank_0('Evaluating iter {}/{}'.format(iteration,
-                                                            eval_iters))
+            # if verbose and iteration % args.log_interval == 0:
+            #     print_rank_0('Evaluating iter {}/{}'.format(iteration,
+            #                                                 eval_iters))
 
             forward_backward_func = get_forward_backward_func()
             loss_dicts = forward_backward_func(
@@ -814,6 +816,7 @@ def evaluate(forward_step_func,
             args.consumed_valid_samples += mpu.get_data_parallel_world_size() \
                                            * args.micro_batch_size \
                                            * get_num_microbatches()
+            pbar.update(1)
         collected_non_loss_data = None
         if process_non_loss_data_func is not None and is_last_rank():
             collected_non_loss_data = forward_backward_func(
