@@ -305,6 +305,7 @@ def build_train_valid_test_datasets(data_prefix: Optional[str],
         )
         train_dataset, valid_dataset, test_dataset = None, None, None
         # Single dataset.
+        print_rank_0(" > train data path: {}".format(train_data_prefix))
         if train_data_prefix is not None:
             train_dataset = _build_dataset(
                 "train",
@@ -316,6 +317,7 @@ def build_train_valid_test_datasets(data_prefix: Optional[str],
                 skip_warmup,
             )
 
+        print_rank_0(" > valid data path: {}".format(valid_data_prefix))
         if valid_data_prefix is not None:
             valid_dataset = _build_dataset(
                 "valid",
@@ -327,6 +329,7 @@ def build_train_valid_test_datasets(data_prefix: Optional[str],
                 False,
             )
 
+        print_rank_0(" > test data path: {}".format(test_data_prefix))
         if test_data_prefix is not None:
             test_dataset = _build_dataset(
                 "test",

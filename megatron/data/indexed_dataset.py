@@ -16,6 +16,7 @@ import shutil
 import struct
 from itertools import accumulate
 
+import lz4.frame
 import numpy as np
 import torch
 from megatron import print_rank_0
@@ -99,7 +100,8 @@ dtypes = {
     6: float,
     7: np.double,
     8: np.uint16,
-    9: np.float32
+    9: np.float32,
+    10: np.float16,
 }
 
 
@@ -155,7 +157,12 @@ class IndexedDataset(torch.utils.data.Dataset):
             self.doc_idx = read_longs(f, self.doc_count)
 
     def read_data(self, path):
-        self.data_file = open(data_file_path(path), 'rb', buffering=0)
+        data_path = data_file_path(path)
+        if not os.path.exists(data_path):
+            print(f"Dataset file not found: {data_path}, trying .lz4")
+            data_path = data_path + ".lz4"
+            assert os.path.exists(data_path), f"Dataset file not found: {data_path}"
+        self.data_file = open(data_path, 'rb', buffering=0)
 
     def check_index(self, i):
         if i < 0 or i >= self._len:
@@ -547,7 +554,11 @@ class MMapIndexedDataset(torch.utils.data.Dataset):
 
 class MMapIndexedDatasetBuilder(object):
     def __init__(self, out_file, dtype=np.int64):
-        self._data_file = open(out_file, 'wb')
+        if out_file.endswith('.lz4'):
+            self._data_file = lz4.frame.open(out_file, 'wb')
+            print_rank_0(f"    creating lz4 compressed mmap file: {out_file}")
+        else:
+            self._data_file = open(out_file, 'wb')
         self._dtype = dtype
         self._sizes = []
         self._doc_idx = [0]
