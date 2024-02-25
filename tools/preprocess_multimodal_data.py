@@ -247,7 +247,7 @@ class DatasetWriter:
 
 class ImageDatasetWriter:
     def __init__(self, prefix: str, feature: str = "image_patch"):
-        self.bin_fname = f"{prefix}-{feature}.bin.lz4" # SAVE AS LZ4
+        self.bin_fname = f"{prefix}-{feature}.bin"
         self.idx_fname = f"{prefix}-{feature}.idx"
         self.builder = None
 
