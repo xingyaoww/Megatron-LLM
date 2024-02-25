@@ -520,7 +520,7 @@ def main():
             vision_patch_indices_writer.add_item(vision_patch_indices)
             stats = {
                 "n_tokens": len(tokens),
-                "n_image_tokens": len(list(map(lambda r: r == Role.image.value, roles)))
+                "n_image_tokens": sum(list(map(lambda r: r == Role.image.value, roles)))
             }
             output_file.write(json.dumps(stats) + "\n")
 
