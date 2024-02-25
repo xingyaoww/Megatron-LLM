@@ -527,7 +527,7 @@ def main():
                 # Add a dummy patch IF no vision patches are found
                 # This is to ensure that the MMAP in the training code works
                 vision_patches = [
-                    np.zeros((3, PATCH_SIZE, PATCH_SIZE), dtype=np.float32)
+                    np.zeros((3, PATCH_SIZE, PATCH_SIZE), dtype=np.float16)
                 ]
 
             token_writer.add_item(tokens)
