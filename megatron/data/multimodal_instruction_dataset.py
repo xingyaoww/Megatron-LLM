@@ -326,7 +326,7 @@ def build_train_valid_test_datasets(data_prefix: Optional[str],
                 train_valid_test_num_samples[1],
                 seq_length,
                 seed,
-                False,
+                skip_warmup,
             )
 
         print_rank_0(" > test data path: {}".format(test_data_prefix))
@@ -338,7 +338,7 @@ def build_train_valid_test_datasets(data_prefix: Optional[str],
                 train_valid_test_num_samples[2],
                 seq_length,
                 seed,
-                False,
+                skip_warmup,
             )
         return train_dataset, valid_dataset, test_dataset
 
