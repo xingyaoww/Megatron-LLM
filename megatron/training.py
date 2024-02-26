@@ -144,6 +144,7 @@ def pretrain(args,
                            opt_param_scheduler,
                            train_data_iterator,
                            valid_data_iterator,
+                           test_data_iterator,
                            process_non_loss_data_func)
     print_datetime('after training is done')
 
@@ -167,7 +168,7 @@ def pretrain(args,
         prefix = 'the end of training for test data'
         evaluate_and_print_results(prefix, forward_step_func,
                                    test_data_iterator, model,
-                                   0, process_non_loss_data_func,
+                                   iteration, process_non_loss_data_func,
                                    verbose=True, args=args, test=True)
 
 
@@ -659,6 +660,7 @@ def _train(args, forward_step_func,
           opt_param_scheduler,
           train_data_iterator,
           valid_data_iterator,
+          test_data_iterator,
           process_non_loss_data_func):
     """Train the model function."""
     timers = get_timers()
@@ -712,15 +714,24 @@ def _train(args, forward_step_func,
                                               opt_param_scheduler, args)
 
         # Evaluation
-        if args.eval_interval and iteration % args.eval_interval == 0 and \
-           args.do_valid:
-            prefix = 'iteration {}'.format(iteration)
-            current_tokens = counters['tokens']
-            evaluate_and_print_results(prefix, forward_step_func,
-                                       valid_data_iterator, model,
-                                       iteration, process_non_loss_data_func,
-                                       verbose=True, args=args)
-            counters['tokens'] = current_tokens
+        if args.eval_interval and iteration % args.eval_interval == 0:
+            if args.do_valid:
+                prefix = 'iteration {}'.format(iteration)
+                current_tokens = counters['tokens']
+                evaluate_and_print_results(prefix, forward_step_func,
+                                            valid_data_iterator, model,
+                                            iteration, process_non_loss_data_func,
+                                            verbose=True, args=args)
+                counters['tokens'] = current_tokens
+            
+            if args.do_test:
+                prefix = 'iteration {}'.format(iteration)
+                current_tokens = counters['tokens']
+                evaluate_and_print_results(prefix, forward_step_func,
+                                            test_data_iterator, model,
+                                            iteration, process_non_loss_data_func,
+                                            verbose=True, args=args, test=True)
+                counters['tokens'] = current_tokens
 
 
         # if using wandb writer, flush the stats of train_step & potentially evaluate
@@ -848,7 +859,8 @@ def evaluate_and_print_results(prefix,
         process_non_loss_data_func, 
         eval_iters=args.valid_iters if not test else args.test_iters,
         verbose=verbose)
-    string = ' validation loss at {} | '.format(prefix)
+    eval_type = 'test' if test else 'validation'
+    string = ' {} loss at {} | '.format(eval_type, prefix)
     for key in total_loss_dict:
         string += '{} value: {:.6E} | '.format(key, total_loss_dict[key].item())
         if "lm loss" in key:
@@ -857,16 +869,16 @@ def evaluate_and_print_results(prefix,
         else:
             ppl = None
         if writer:
-            writer.add_scalar('{} validation'.format(key),
+            writer.add_scalar('{} {}'.format(key, eval_type),
                               total_loss_dict[key].item(),
                               iteration)
-            writer.add_scalar('{} validation vs samples'.format(key),
+            writer.add_scalar('{} {} vs samples'.format(key, eval_type),
                               total_loss_dict[key].item(),
                               args.consumed_train_samples)
             if args.log_validation_ppl_to_tensorboard and ppl is not None:
-                writer.add_scalar('{} validation ppl'.format(key), ppl,
+                writer.add_scalar('{} {} ppl'.format(key, eval_type), ppl,
                                   iteration)
-                writer.add_scalar('{} validation ppl vs samples'.format(key),
+                writer.add_scalar('{} {} ppl vs samples'.format(key, eval_type),
                                   ppl, args.consumed_train_samples)
 
     if process_non_loss_data_func is not None and writer and is_last_rank():
@@ -908,7 +920,8 @@ def build_train_valid_test_data_iterators(build_train_valid_test_datasets_provid
             train_samples = args.train_iters * args.global_batch_size
         valid_iters = (args.train_iters // args.eval_interval + 1) * \
                      args.valid_iters
-        test_iters = args.test_iters
+        test_iters = (args.test_iters // args.eval_interval + 1) * \
+                    args.test_iters
         train_val_test_num_samples = [train_samples,
                                       valid_iters * args.global_batch_size,
                                       test_iters * args.global_batch_size]
