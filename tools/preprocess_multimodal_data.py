@@ -149,7 +149,12 @@ class Encoder(object):
 
         for turn in conversations:
             role = turn["role"]
-            assert isinstance(turn["content"], list), "Content must be a list for multimodal data."
+            if not isinstance(turn["content"], list):
+                assert isinstance(turn["content"], str), "Content must be a string (text) if not a list."
+                turn["content"] = [{
+                    "type": "text",
+                    "text": turn["content"]
+                }]
 
             # add format prefix/suffix if not pre-training
             if not self.args.do_pretrain:
