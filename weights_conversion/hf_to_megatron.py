@@ -293,8 +293,15 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
         # from scripts/model/modeling_multimodal_mistral.py
         from scripts.model.modeling_multimodal_mistral import MultimodalMistralForCausalLM
         model = MultimodalMistralForCausalLM.from_pretrained(model_path,
-                                                            trust_remote_code=True,
-                                                            cache_dir=cache_dir)
+                                                        trust_remote_code=True,
+                                                        cache_dir=cache_dir,
+                                                        ignore_mismatched_sizes=True)
+        # check vocab size
+        if model.config.vocab_size != 33029:
+            print(f"Vocab size is {model.config.vocab_size}, resizing to 33029")
+            # correct vocab size
+            model.resize_token_embeddings(33029)
+        assert model.config.vocab_size == 33029
         hf_weights = model.state_dict()
     else:
         print("Getting llama...")
