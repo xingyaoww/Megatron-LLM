@@ -112,10 +112,12 @@ def _load_checkpoint(queue, args):
 
     consumed_train_samples = None
     consumed_valid_samples = None
+    consumed_test_samples = None
 
     def _get_models(count, dtype, pre_process, post_process):
         nonlocal consumed_train_samples
         nonlocal consumed_valid_samples
+        nonlocal consumed_test_samples
         models = []
         for rank in range(count):
             mpu.set_tensor_model_parallel_rank(rank)
@@ -133,6 +135,10 @@ def _load_checkpoint(queue, args):
                 assert(margs.consumed_valid_samples == consumed_valid_samples)
             else:
                 consumed_valid_samples = margs.consumed_valid_samples
+            if consumed_test_samples is not None:
+                assert(margs.consumed_test_samples == consumed_test_samples)
+            else:
+                consumed_test_samples = margs.consumed_test_samples
             models.append(model_)
         return models
 

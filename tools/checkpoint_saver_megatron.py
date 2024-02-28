@@ -143,8 +143,10 @@ def save_checkpoint(queue, args):
     if hasattr(md, 'consumed_train_samples'):
         margs.consumed_train_samples = md.consumed_train_samples
         margs.consumed_valid_samples = md.consumed_valid_samples
+        margs.consumed_test_samples = md.consumed_test_samples
         print(f"Setting consumed_train_samples to {margs.consumed_train_samples}"
-              f" and consumed_valid_samples to {margs.consumed_valid_samples}")
+              f" and consumed_valid_samples to {margs.consumed_valid_samples}"
+                f" and consumed_test_samples to {margs.consumed_test_samples}")
     else:
         print("consumed_train_samples not provided.")
 

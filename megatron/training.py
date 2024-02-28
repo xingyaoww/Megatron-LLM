@@ -789,6 +789,7 @@ def evaluate(forward_step_func,
              process_non_loss_data_func,
              eval_iters,
              verbose=False,
+             test=False
     ):
     """Evaluation."""
     args = get_args()
@@ -824,9 +825,14 @@ def evaluate(forward_step_func,
                         total_loss_dict[key] = total_loss_dict.get(
                             key, torch.cuda.FloatTensor([0.0])) + loss_dict[key]
 
-            args.consumed_valid_samples += mpu.get_data_parallel_world_size() \
-                                           * args.micro_batch_size \
-                                           * get_num_microbatches()
+            if not test:
+                args.consumed_valid_samples += mpu.get_data_parallel_world_size() \
+                                            * args.micro_batch_size \
+                                            * get_num_microbatches()
+            else:
+                args.consumed_test_samples += mpu.get_data_parallel_world_size() \
+                                            * args.micro_batch_size \
+                                            * get_num_microbatches()
             pbar.update(1)
         collected_non_loss_data = None
         if process_non_loss_data_func is not None and is_last_rank():
@@ -858,7 +864,9 @@ def evaluate_and_print_results(prefix,
         forward_step_func, data_iterator, model,
         process_non_loss_data_func, 
         eval_iters=args.valid_iters if not test else args.test_iters,
-        verbose=verbose)
+        verbose=verbose,
+        test=test
+    )
     eval_type = 'test' if test else 'validation'
     string = ' {} loss at {} | '.format(eval_type, prefix)
     for key in total_loss_dict:
@@ -910,6 +918,10 @@ def build_train_valid_test_data_iterators(build_train_valid_test_datasets_provid
         if args.train_samples is None:
             args.consumed_valid_samples = (args.iteration // args.eval_interval) * \
                 args.valid_iters * args.global_batch_size
+    if args.iteration > 0 and args.consumed_test_samples == 0:
+        if args.train_samples is None:
+            args.consumed_test_samples = (args.iteration // args.eval_interval) * \
+                args.test_iters * args.global_batch_size
 
     # Data loader only on rank 0 of each model parallel group.
     if mpu.get_tensor_model_parallel_rank() == 0:
@@ -939,7 +951,8 @@ def build_train_valid_test_data_iterators(build_train_valid_test_datasets_provid
             train_ds, args.consumed_train_samples, collate_fn=collate_fn)
         valid_dataloader = build_pretraining_data_loader(
             valid_ds, args.consumed_valid_samples, collate_fn=collate_fn)
-        test_dataloader = build_pretraining_data_loader(test_ds, 0, collate_fn=collate_fn)
+        test_dataloader = build_pretraining_data_loader(
+            test_ds, args.consumed_test_samples, collate_fn=collate_fn)
 
         # Flags to know if we need to do training/validation/testing.
         do_train = train_dataloader is not None and args.train_iters > 0
