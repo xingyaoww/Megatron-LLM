@@ -100,11 +100,18 @@ class GPTModel(MegatronModule):
                 self.word_embeddings_weight(),
                 self.parallel_output,
                 self.fp16_lm_cross_entropy)
+            # print(f"POSTPROCESSret ({type(ret)}): {ret}")
         else:
             ret = lm_output
         
         if self.do_moe_mlp:
-            return ret, all_router_logits
+            # print(f"LATEret (preprocess={self.pre_process}, postprocess={self.post_process}) ({type(ret)}): {ret}")
+            if isinstance(ret, tuple):
+                loss, output = ret
+                return loss, output, all_router_logits
+            else:
+                # will happen in the case of pipeline parallelism
+                return ret, all_router_logits
         else:
             return ret
 

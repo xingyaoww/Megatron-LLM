@@ -237,9 +237,8 @@ def load_balancing_loss_func(gate_logits: torch.Tensor, num_experts: torch.Tenso
     overall_loss = torch.sum(tokens_per_expert * router_prob_per_expert.unsqueeze(-1))
     return overall_loss * num_experts
 
-def moe_loss_func(is_training, batch, outputs, args):
-    model_outputs, all_router_logits = outputs
-    loss, out_dict = loss_func(is_training, batch, model_outputs)
+def moe_loss_func(is_training, batch, outputs, all_router_logits, args):
+    loss, out_dict = loss_func(is_training, batch, outputs)
     
     # add aux loss
     aux_loss = load_balancing_loss_func(all_router_logits, args.num_local_experts, args.num_experts_per_tok)
@@ -263,7 +262,16 @@ def forward_step(data_iterator, model):
                           labels=labels)
     if args.do_moe_mlp:
         # model_output = ((losses, logits), all_router_logits)
-        return model_output, partial(moe_loss_func, model.training, batch, args)
+        # print_rank_0(f"Using MOE MLP, model_output: {model_output}")
+        if len(model_output) == 2:
+            logits, all_router_logits = model_output
+            model_output = logits
+        else:
+            losses, logits, all_router_logits = model_output
+            model_output = (losses, logits)
+        # print_rank_0(f"Using MOE MLP, model_output: {model_output}")
+        # print_rank_0(f"Using MOE MLP, all_router_logits: {all_router_logits}")
+        return model_output, partial(moe_loss_func, model.training, batch, all_router_logits=all_router_logits, args=args)
     else:    
         return model_output, partial(loss_func, model.training, batch)
 

@@ -692,7 +692,9 @@ def forward_backward_pipelining_without_interleaving(forward_step_func,
             # the backward pass.
             input_tensor = input_tensors.pop(0)
             output_tensor = output_tensors.pop(0)
-
+            # print(f"BACKWARDinput_tensor ({type(input_tensor)}): {input_tensor}")
+            # print(f"BACKWARDoutput_tensor ({type(output_tensor)}): {output_tensor}")
+            # print(f"BACKWARDoutput_tensor_grad ({type(output_tensor_grad)}): {output_tensor_grad}")
             input_tensor_grad = \
                 backward_step(optimizer, input_tensor, output_tensor,
                               output_tensor_grad, timers)
