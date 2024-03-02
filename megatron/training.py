@@ -682,6 +682,27 @@ def _train(args, forward_step_func,
     timers('interval-time', log_level=0).start(barrier=True)
     print_datetime('before the start of training step')
     report_memory_flag = True
+
+    # Evaluation at the start of training
+    if args.eval_interval and iteration == 0:
+        if args.do_valid:
+            prefix = 'iteration {}'.format(iteration)
+            current_tokens = counters['tokens']
+            evaluate_and_print_results(prefix, forward_step_func,
+                                        valid_data_iterator, model,
+                                        iteration, process_non_loss_data_func,
+                                        verbose=True, args=args)
+            counters['tokens'] = current_tokens
+        
+        if args.do_test:
+            prefix = 'iteration {}'.format(iteration)
+            current_tokens = counters['tokens']
+            evaluate_and_print_results(prefix, forward_step_func,
+                                        test_data_iterator, model,
+                                        iteration, process_non_loss_data_func,
+                                        verbose=True, args=args, test=True)
+            counters['tokens'] = current_tokens
+
     while iteration < args.train_iters:
         update_num_microbatches(args.consumed_train_samples)
         args.curr_iteration = iteration
@@ -930,9 +951,11 @@ def build_train_valid_test_data_iterators(build_train_valid_test_datasets_provid
             train_samples = args.train_samples
         else:
             train_samples = args.train_iters * args.global_batch_size
-        valid_iters = (args.train_iters // args.eval_interval + 1) * \
+        # Add extra samples for validation and test
+        # for (1) the first iteration, and (2) the last iteration
+        valid_iters = (args.train_iters // args.eval_interval + 1 + 1) * \
                      args.valid_iters
-        test_iters = (args.test_iters // args.eval_interval + 1) * \
+        test_iters = (args.train_iters // args.eval_interval + 1 + 1) * \
                     args.test_iters
         train_val_test_num_samples = [train_samples,
                                       valid_iters * args.global_batch_size,
