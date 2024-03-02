@@ -382,7 +382,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             current_param_buffers = {}
             for dtype, grad_buffer in model._grad_buffers.items():
                 try:
-                    param_buffer = torch.tensor(grad_buffer.data.storage().untyped(),
+                    param_buffer = torch.tensor(grad_buffer.data.untyped_storage(),
                                                 dtype = params_dtype,
                                                 device = grad_buffer.data.device)
                 except:
