@@ -6,6 +6,7 @@ from datetime import datetime
 import math
 import sys
 import time
+import traceback
 from typing import Callable
 from tqdm import tqdm
 
@@ -703,102 +704,108 @@ def _train(args, forward_step_func,
                                         verbose=True, args=args, test=True)
             counters['tokens'] = current_tokens
 
-    while iteration < args.train_iters:
-        update_num_microbatches(args.consumed_train_samples)
-        args.curr_iteration = iteration
-        loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
-            train_step(forward_step_func,
-                       train_data_iterator,
-                       model,
-                       optimizer,
-                       opt_param_scheduler, iteration, args)
-        iteration += 1
-        args.consumed_train_samples += mpu.get_data_parallel_world_size() * \
-                                       args.micro_batch_size * \
-                                       get_num_microbatches()
+    try:
+        while iteration < args.train_iters:
+            update_num_microbatches(args.consumed_train_samples)
+            args.curr_iteration = iteration
+            loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
+                train_step(forward_step_func,
+                        train_data_iterator,
+                        model,
+                        optimizer,
+                        opt_param_scheduler, iteration, args)
+            iteration += 1
+            args.consumed_train_samples += mpu.get_data_parallel_world_size() * \
+                                        args.micro_batch_size * \
+                                        get_num_microbatches()
 
-        # Logging.
-        loss_scale = optimizer.get_loss_scale().item()
-        params_norm = None
-        if args.log_params_norm:
-            params_norm = calc_params_l2_norm(model)
-        report_memory_flag = training_log(loss_dict, total_loss_dict,
-                                          optimizer.param_groups[0]['lr'],
-                                          iteration, loss_scale,
-                                          report_memory_flag, skipped_iter,
-                                          grad_norm, params_norm, num_zeros_in_grad)
+            # Logging.
+            loss_scale = optimizer.get_loss_scale().item()
+            params_norm = None
+            if args.log_params_norm:
+                params_norm = calc_params_l2_norm(model)
+            report_memory_flag = training_log(loss_dict, total_loss_dict,
+                                            optimizer.param_groups[0]['lr'],
+                                            iteration, loss_scale,
+                                            report_memory_flag, skipped_iter,
+                                            grad_norm, params_norm, num_zeros_in_grad)
 
-        # Autoresume
-        if args.adlr_autoresume and \
-           (iteration % args.adlr_autoresume_interval == 0):
-            megatron.utils.check_adlr_autoresume_termination(iteration, model, optimizer,
-                                              opt_param_scheduler, args)
+            # Autoresume
+            if args.adlr_autoresume and \
+            (iteration % args.adlr_autoresume_interval == 0):
+                megatron.utils.check_adlr_autoresume_termination(iteration, model, optimizer,
+                                                opt_param_scheduler, args)
 
-        # Evaluation
-        if args.eval_interval and iteration % args.eval_interval == 0:
-            if args.do_valid:
-                prefix = 'iteration {}'.format(iteration)
-                current_tokens = counters['tokens']
-                evaluate_and_print_results(prefix, forward_step_func,
-                                            valid_data_iterator, model,
-                                            iteration, process_non_loss_data_func,
-                                            verbose=True, args=args)
-                counters['tokens'] = current_tokens
-            
-            if args.do_test:
-                prefix = 'iteration {}'.format(iteration)
-                current_tokens = counters['tokens']
-                evaluate_and_print_results(prefix, forward_step_func,
-                                            test_data_iterator, model,
-                                            iteration, process_non_loss_data_func,
-                                            verbose=True, args=args, test=True)
-                counters['tokens'] = current_tokens
+            # Evaluation
+            if args.eval_interval and iteration % args.eval_interval == 0:
+                if args.do_valid:
+                    prefix = 'iteration {}'.format(iteration)
+                    current_tokens = counters['tokens']
+                    evaluate_and_print_results(prefix, forward_step_func,
+                                                valid_data_iterator, model,
+                                                iteration, process_non_loss_data_func,
+                                                verbose=True, args=args)
+                    counters['tokens'] = current_tokens
+                
+                if args.do_test:
+                    prefix = 'iteration {}'.format(iteration)
+                    current_tokens = counters['tokens']
+                    evaluate_and_print_results(prefix, forward_step_func,
+                                                test_data_iterator, model,
+                                                iteration, process_non_loss_data_func,
+                                                verbose=True, args=args, test=True)
+                    counters['tokens'] = current_tokens
 
 
-        # if using wandb writer, flush the stats of train_step & potentially evaluate
-        writer = get_tensorboard_writer()
-        if hasattr(writer, "flush_all"):
-            writer.flush_all()
+            # if using wandb writer, flush the stats of train_step & potentially evaluate
+            writer = get_tensorboard_writer()
+            if hasattr(writer, "flush_all"):
+                writer.flush_all()
 
-        # Checkpointing
-        saved_checkpoint = False
-        if args.exit_signal_handler:
-            signal_handler = get_signal_handler()
-            if any(signal_handler.signals_received()):
+            # Checkpointing
+            saved_checkpoint = False
+            if args.exit_signal_handler:
+                signal_handler = get_signal_handler()
+                if any(signal_handler.signals_received()):
+                    save_checkpoint_and_time(iteration, model, optimizer,
+                                            opt_param_scheduler)
+                    print_datetime('exiting program after receiving SIGTERM.')
+                    sys.exit()
+
+            if args.save and args.save_interval and \
+            iteration % args.save_interval == 0:
                 save_checkpoint_and_time(iteration, model, optimizer,
-                                         opt_param_scheduler)
-                print_datetime('exiting program after receiving SIGTERM.')
-                sys.exit()
+                                        opt_param_scheduler)
+                saved_checkpoint = True
 
-        if args.save and args.save_interval and \
-           iteration % args.save_interval == 0:
-            save_checkpoint_and_time(iteration, model, optimizer,
-                                     opt_param_scheduler)
-            saved_checkpoint = True
+            # Exiting based on duration
+            if args.exit_duration_in_mins:
+                train_time = (time.time() - _TRAIN_START_TIME) / 60.0
+                done_cuda = torch.cuda.IntTensor(
+                    [train_time > args.exit_duration_in_mins])
+                torch.distributed.all_reduce(
+                    done_cuda, op=torch.distributed.ReduceOp.MAX)
+                done = done_cuda.item()
+                if done:
+                    if not saved_checkpoint:
+                        save_checkpoint_and_time(iteration, model, optimizer,
+                                                opt_param_scheduler)
+                    print_datetime('exiting program after {} minutes'.format(train_time))
+                    sys.exit()
 
-        # Exiting based on duration
-        if args.exit_duration_in_mins:
-            train_time = (time.time() - _TRAIN_START_TIME) / 60.0
-            done_cuda = torch.cuda.IntTensor(
-                [train_time > args.exit_duration_in_mins])
-            torch.distributed.all_reduce(
-                done_cuda, op=torch.distributed.ReduceOp.MAX)
-            done = done_cuda.item()
-            if done:
+            # Exiting based on iterations
+            if args.exit_interval and iteration % args.exit_interval == 0:
                 if not saved_checkpoint:
                     save_checkpoint_and_time(iteration, model, optimizer,
-                                             opt_param_scheduler)
-                print_datetime('exiting program after {} minutes'.format(train_time))
+                                            opt_param_scheduler)
+                torch.distributed.barrier()
+                print_datetime('exiting program at iteration {}'.format(iteration))
                 sys.exit()
-
-        # Exiting based on iterations
-        if args.exit_interval and iteration % args.exit_interval == 0:
-            if not saved_checkpoint:
-                save_checkpoint_and_time(iteration, model, optimizer,
-                                         opt_param_scheduler)
-            torch.distributed.barrier()
-            print_datetime('exiting program at iteration {}'.format(iteration))
-            sys.exit()
+    except Exception as e:
+        print_rank_0('Exiting due to exception: {}'.format(traceback.format_exc()))
+        if args.save_on_exception:
+            save_checkpoint_and_time(iteration, model, optimizer,
+                                    opt_param_scheduler)
 
 
     return iteration
