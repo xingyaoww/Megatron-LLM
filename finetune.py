@@ -210,6 +210,18 @@ def forward_step(data_iterator, model):
 
     if args.data_type == "multimodal_instruction":
         tokens, labels, loss_mask, attention_mask, position_ids, vision_patch_indices, vision_patches = batch
+
+        if not forward_step.first_batch_printed:
+            print_rank_0("First batch:")
+            print_rank_0(f"tokens: {tokens[:, :30]}")
+            print_rank_0(f"labels: {labels[:, :30]}")
+            print_rank_0(f"loss_mask: {loss_mask[:, :30]}")
+            print_rank_0(f"attention_mask: {attention_mask [:, :30]}")
+            print_rank_0(f"position_ids: {position_ids[:, :30]}")
+            print_rank_0(f"vision_patch_indices: {vision_patch_indices[:, :30]}")
+            print_rank_0(f"vision_patches: {vision_patches}")
+            forward_step.first_batch_printed = True
+
         timers("batch-generator").stop()
         output_tensor = model(tokens, position_ids, attention_mask,
                               vision_patch_indices=vision_patch_indices,
@@ -222,7 +234,7 @@ def forward_step(data_iterator, model):
                              labels=labels)
 
     return output_tensor, partial(loss_func, model.training, batch)
-
+forward_step.first_batch_printed = False
 
 ##
 # Main
