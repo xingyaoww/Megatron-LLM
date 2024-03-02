@@ -124,6 +124,7 @@ def _load_checkpoint(queue, args):
             model_ = [model_provider(pre_process, post_process).to(dtype)]
             margs.consumed_train_samples = 0
             margs.consumed_valid_samples = 0
+            margs.consumed_test_samples = 0
             load_checkpoint(model_, None, None)
             assert(len(model_) == 1)
             model_ = model_[0]
@@ -215,6 +216,7 @@ def _load_checkpoint(queue, args):
 
     md.consumed_train_samples = consumed_train_samples
     md.consumed_valid_samples = consumed_valid_samples
+    md.consumed_test_samples = consumed_test_samples
     queue.put(md)
 
     def queue_put(name, msg):
