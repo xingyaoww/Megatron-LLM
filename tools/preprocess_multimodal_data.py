@@ -319,6 +319,7 @@ def get_args():
     group.add_argument("--do_pretrain", action="store_true",
                        help=("Whether to format data for pretraining by removing all the chat format."))
     group.add_argument("--max_seq_length", type=int, default=4096)
+    group.add_argument("--target_size", type=int, default=None)
     args = parser.parse_args()
     args.keep_empty = False
 
@@ -519,6 +520,10 @@ def main():
         print("Time to startup:", startup_end - startup_start)
 
         for i, content in enumerate(docs, start=1):
+            if args.target_size and i >= args.target_size:
+                print(f"Target size reached. Stopping.")
+                break
+
             (size, tokens, roles, vision_patches, vision_patch_indices, n_images) = content
             total_bytes_processed += size
             if len(tokens) == 0:
