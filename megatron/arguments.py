@@ -898,6 +898,8 @@ def _add_validation_args(parser):
     group.add_argument('--eval_interval', type=int, default=1000,
                        help='Interval between running evaluation on '
                        'validation set.')
+    group.add_argument('--eval_at_start', action='store_true',
+                       help='Run evaluation at the start of training.')
     return parser
 
 

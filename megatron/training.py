@@ -684,7 +684,7 @@ def _train(args, forward_step_func,
     report_memory_flag = True
 
     # Evaluation at the start of training
-    if args.eval_interval and iteration == 0:
+    if args.eval_at_start and iteration == 0:
         if args.do_valid:
             prefix = 'iteration {}'.format(iteration)
             current_tokens = counters['tokens']
@@ -953,9 +953,10 @@ def build_train_valid_test_data_iterators(build_train_valid_test_datasets_provid
             train_samples = args.train_iters * args.global_batch_size
         # Add extra samples for validation and test
         # for (1) the first iteration, and (2) the last iteration
-        valid_iters = (args.train_iters // args.eval_interval + 1 + 1) * \
+        extra_iter = 1 if args.eval_at_start else 0
+        valid_iters = (args.train_iters // args.eval_interval + 1 + extra_iter) * \
                      args.valid_iters
-        test_iters = (args.train_iters // args.eval_interval + 1 + 1) * \
+        test_iters = (args.train_iters // args.eval_interval + 1 + extra_iter) * \
                     args.test_iters
         train_val_test_num_samples = [train_samples,
                                       valid_iters * args.global_batch_size,
