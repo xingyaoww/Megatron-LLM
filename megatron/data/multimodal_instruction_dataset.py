@@ -524,7 +524,9 @@ def instruction_collator(
     )
     # convert to torch.int64
     attention_mask = attention_mask.to(torch.int64)
-    loss_mask = loss_mask[:, :-1]
+
+    # labels = input[:, 1:].contiguous() therefore we need to shift the loss_mask similarly
+    loss_mask = loss_mask[:, 1:].contiguous()
     vision_patch_indices = vision_patch_indices[:, :-1]
     # aggregate vision patches
     vision_patches = torch.tensor(np.array(vision_patches), dtype=torch.float32)
