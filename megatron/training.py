@@ -801,6 +801,11 @@ def _train(args, forward_step_func,
                 torch.distributed.barrier()
                 print_datetime('exiting program at iteration {}'.format(iteration))
                 sys.exit()
+    except KeyboardInterrupt:
+        print_rank_0('Exiting due to keyboard interrupt.')
+        if args.save_on_interrupt and input('Do you want to save the model? (y/n)').strip().lower() == 'y':
+            save_checkpoint_and_time(iteration, model, optimizer,
+                                    opt_param_scheduler)
     except Exception as e:
         print_rank_0('Exiting due to exception: {}'.format(traceback.format_exc()))
         if args.save_on_exception:
