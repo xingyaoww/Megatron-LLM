@@ -458,7 +458,9 @@ def train_step(forward_step_func, data_iterator,
         loss_reduced = {}
         for key in losses_reduced[0]:
             losses_reduced_for_key = [x[key] for x in losses_reduced]
-            loss_reduced[key] = sum(losses_reduced_for_key) / len(losses_reduced_for_key)
+            # loss_reduced[key] = sum(losses_reduced_for_key) / len(losses_reduced_for_key)
+            # ignore nan
+            loss_reduced[key] = torch.nanmean(torch.stack(losses_reduced_for_key))
         return loss_reduced, skipped_iter, grad_norm, num_zeros_in_grad
     return {}, skipped_iter, grad_norm, num_zeros_in_grad
 
@@ -802,9 +804,8 @@ def _train(args, forward_step_func,
                 print_datetime('exiting program at iteration {}'.format(iteration))
                 sys.exit()
     except KeyboardInterrupt:
-        print_rank_0('Exiting due to keyboard interrupt.')
-        if args.save_on_interrupt and input('Do you want to save the model? (y/n)').strip().lower() == 'y':
-            save_checkpoint_and_time(iteration, model, optimizer,
+        print_rank_0('Exiting due to keyboard interrupt and saving checkpoint')
+        save_checkpoint_and_time(iteration, model, optimizer,
                                     opt_param_scheduler)
     except Exception as e:
         print_rank_0('Exiting due to exception: {}'.format(traceback.format_exc()))

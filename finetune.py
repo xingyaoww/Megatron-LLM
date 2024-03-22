@@ -183,11 +183,40 @@ def loss_func(is_training, batch, outputs):
     loss_mask = batch[2]
     losses, logits = outputs
     losses = losses.float()
-    loss_mask = loss_mask.view(-1).float()
-    loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
-    # Reduce loss for logging.
-    averaged_loss = average_losses_across_data_parallel_group([loss])
-    out_dict = {"lm loss": averaged_loss[0]}
+
+    if len(batch) == 7:
+        tokens, labels, loss_mask, attention_mask, position_ids, vision_patch_indices, vision_patches = batch
+        is_image_token = vision_patch_indices != -1
+        is_image_example = is_image_token.any(dim=1)
+
+        img_loss = torch.sum(losses[is_image_example].view(-1) * loss_mask[is_image_example].view(-1))
+        img_loss_normalized = img_loss / loss_mask[is_image_example].sum()
+
+        txt_loss = torch.sum(losses[~is_image_example].view(-1) * loss_mask[~is_image_example].view(-1))
+        txt_loss_normalized = txt_loss / loss_mask[~is_image_example].sum()
+
+        loss = torch.nansum(torch.stack([img_loss, txt_loss])) / loss_mask.sum()
+
+        avg_img_loss = average_losses_across_data_parallel_group([img_loss_normalized], skip_nan=True)
+        avg_txt_loss = average_losses_across_data_parallel_group([txt_loss_normalized], skip_nan=True)
+        average_loss = average_losses_across_data_parallel_group([loss])
+
+        out_dict = {"lm loss": average_loss[0], "img lm loss": avg_img_loss[0], "txt lm loss": avg_txt_loss[0]}
+        # if not is_image_example.any():
+        #     print_rank_0(f"is_image_token: {is_image_token}")
+        #     print_rank_0(f"is_image_example: {is_image_example}")
+        #     print_rank_0(f"losses[is_image_example]: {losses[is_image_example]}")
+        #     print_rank_0(f"losses[~is_image_example]: {losses[~is_image_example]}")
+        #     print_rank_0(f"out_dict: {out_dict}")
+        
+        # print_rank_0(f"is_image_token: {is_image_token}")
+        # print_rank_0(f"is_image_example: {is_image_example}")
+    else:
+        loss_mask = loss_mask.view(-1).float()
+        loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
+        # Reduce loss for logging.
+        averaged_loss = average_losses_across_data_parallel_group([loss])
+        out_dict = {"lm loss": averaged_loss[0]}
 
     # Calculate other metrics
     if not is_training:
@@ -216,10 +245,16 @@ def forward_step(data_iterator, model):
             print_rank_0(f"tokens: {tokens[:, :30]}")
             print_rank_0(f"labels: {labels[:, :30]}")
             print_rank_0(f"loss_mask: {loss_mask[:, :30]}")
-            print_rank_0(f"attention_mask: {attention_mask [:, :30]}")
+            print_rank_0(f"attention_mask: {attention_mask[:, :30]}")
             print_rank_0(f"position_ids: {position_ids[:, :30]}")
             print_rank_0(f"vision_patch_indices: {vision_patch_indices[:, :30]}")
             print_rank_0(f"vision_patches: {vision_patches}")
+            # with open("first_batch.txt", "w") as f:
+            #     f.write("token\tlabel\tloss_mask\tattention_mask\tposition_id\tvision_patch_index\n")
+            #     for cur_token, cur_label, cur_loss_mask, cur_attention_mask, cur_position_id, cur_vision_patch_index in zip(
+            #         tokens[0], labels[0], loss_mask[0], attention_mask[0], position_ids[0], vision_patch_indices[0]
+            #     ):
+            #         f.write(f"{cur_token.item()}\t{cur_label.item()}\t{cur_loss_mask.item()}\t{cur_attention_mask.item()}\t{cur_position_id.item()}\t{cur_vision_patch_index.item()}\n")
             forward_step.first_batch_printed = True
 
         timers("batch-generator").stop()
