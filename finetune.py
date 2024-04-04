@@ -271,6 +271,7 @@ def extra_args(parser):
                        default="encoder_or_decoder")
     group.add_argument("--loss_role", choices={"assistant", "user", "all"},
                        default="assistant")
+    group.add_argument("--no_loss_beyond_token_id", type=int, default=None)
     group.add_argument("--data_type", choices={"gpt", "instruction", "multimodal_instruction"},
                        default="gpt")
     group.add_argument("--log_learning_rate_to_tensorboard", type=bool, default=True)
@@ -292,7 +293,10 @@ if __name__ == "__main__":
             scalar_loss_mask=args.scalar_loss_mask,
             return_attention_mask_in_length=return_attention_mask_in_length,
             loss_role=args.loss_role,
+            no_loss_beyond_token_id=args.no_loss_beyond_token_id,
         )
+        if args.no_loss_beyond_token_id:
+            print_rank_0(f"Loss will not be calculated beyond token id {args.no_loss_beyond_token_id}")
         print_rank_0(f"Loss role set to {args.loss_role} for multimodal-instruction dataset")
         print_rank_0("NOTE: You can still use this for pre-training, as long as you set the loss role to 'assistant' for every token")
     else:
