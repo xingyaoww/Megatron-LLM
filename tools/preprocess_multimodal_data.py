@@ -123,6 +123,13 @@ class Encoder(object):
         Encoder.chat_end_token = Encoder.tokenizer.vocab[self.args.chat_end_token]
 
     def encode(self, line: str) -> tuple[int, list[int], list[int], np.ndarray]:
+        try:
+            return self._encode(line)
+        except Exception as e:
+            print(f"Error encountered, skipping: {e}")
+            return None
+    
+    def _encode(self, line: str) -> tuple[int, list[int], list[int], np.ndarray]:
         # get data
         assert Encoder.tokenizer is not None
 
@@ -354,7 +361,12 @@ def pack_docs(docs: Iterable, tokenizer, max_seq_length, stats_counter, keep_dat
     current_seq_length = 0
     current_size = 0
     pbar = tqdm(desc="Packing documents")
-    for size, tokens, roles, vision_patches, vision_patch_indices, n_images in docs:
+    for content in docs:
+        if content is None:
+            stats_counter["error_skipped"] += 1
+            continue
+
+        size, tokens, roles, vision_patches, vision_patch_indices, n_images = content
 
         stats_counter["n_images"] += n_images
 
@@ -529,6 +541,9 @@ def main():
             if args.target_size and i >= args.target_size:
                 print(f"Target size reached. Stopping.")
                 break
+
+            if content is None:
+                continue
 
             (size, tokens, roles, vision_patches, vision_patch_indices, n_images) = content
             total_bytes_processed += size
