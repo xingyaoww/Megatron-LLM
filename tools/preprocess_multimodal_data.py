@@ -494,17 +494,19 @@ def main():
     assert args.vision_frame_sep_token in tokenizer.vocab
     assert args.vision_end_token in tokenizer.vocab
 
+    def smart_open(f):
+        if ".gz" in f:
+            import gzip
+            print(f"Detected .gz file ({f}), will use gzip.open to read them.")
+            return gzip.open(f)
+        elif ".lz4" in f:
+            import lz4.frame
+            print(f"Detected .lz4 file ({f}), will use lz4.frame.open to read them.")
+            return lz4.frame.open(f)
+        else:
+            return open(f)
 
-    if ".gz" in "".join(args.input):
-        import gzip
-        fs = map(gzip.open, args.input)
-        print(f"Detected .gz file(s), will use gzip.open to read them.")
-    elif ".lz4" in "".join(args.input):
-        import lz4.frame
-        fs = map(lz4.frame.open, args.input)
-        print(f"Detected .lz4 file(s), will use lz4.frame.open to read them.")
-    else:
-        fs = map(open, args.input)
+    fs = map(smart_open, args.input)
 
     output_jsonl = f"{args.output_prefix}.jsonl"
     with DatasetWriter(args.output_prefix, vocab_size, args.dataset_impl,
