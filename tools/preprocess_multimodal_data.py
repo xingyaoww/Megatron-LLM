@@ -100,8 +100,8 @@ def load_base64_to_PILImage(base64_string: str) -> Image:
 
 # def format_message(message: str, role: str) -> str:
 #     return f"<|im_start|>{role}\n{message}<|im_end|>\n"
-MESSAGE_PREFIX = "<|im_start|>{role}\n"
-MESSAGE_SUFFIX = "<|im_end|>\n"
+MESSAGE_PREFIX = "{role}\n"
+MESSAGE_SUFFIX = "\n"
 NON_VISION_TOKEN = -1
 
 class Encoder(object):
@@ -118,6 +118,9 @@ class Encoder(object):
         Encoder.vision_row_sep_token = Encoder.tokenizer.vocab[self.args.vision_row_sep_token]
         Encoder.vision_frame_sep_token = Encoder.tokenizer.vocab[self.args.vision_frame_sep_token]
         Encoder.vision_end_token = Encoder.tokenizer.vocab[self.args.vision_end_token]
+
+        Encoder.chat_start_token = Encoder.tokenizer.vocab[self.args.chat_start_token]
+        Encoder.chat_end_token = Encoder.tokenizer.vocab[self.args.chat_end_token]
 
     def encode(self, line: str) -> tuple[int, list[int], list[int], np.ndarray]:
         # get data
@@ -158,10 +161,10 @@ class Encoder(object):
 
             # add format prefix/suffix if not pre-training
             if not self.args.do_pretrain:
-                prefix_tokens = Encoder.tokenizer.tokenize(MESSAGE_PREFIX.format(role=role))
+                prefix_tokens = [Encoder.chat_start_token] + Encoder.tokenizer.tokenize(MESSAGE_PREFIX.format(role=role))
                 tokens += prefix_tokens
                 roles += [Role[role].value]*len(prefix_tokens)
-                vision_patch_indices += [NON_VISION_TOKEN]*len(tokenized_text)
+                vision_patch_indices += [NON_VISION_TOKEN]*len(prefix_tokens)
 
             for item in turn["content"]:
                 if item["type"] == "text":
@@ -213,9 +216,10 @@ class Encoder(object):
                     raise ValueError(f"Unknown content type (only 'text' and 'image_url' are supported): {item['type']}")
 
             if not self.args.do_pretrain:
-                suffix_tokens = Encoder.tokenizer.tokenize(MESSAGE_SUFFIX)
+                suffix_tokens = [Encoder.chat_end_token] + Encoder.tokenizer.tokenize(MESSAGE_SUFFIX)
                 tokens += suffix_tokens
                 roles += [Role[role].value]*len(suffix_tokens)
+                vision_patch_indices += [NON_VISION_TOKEN]*len(suffix_tokens)
 
         assert len(vision_patches) == len(list(filter(lambda r: r == Role.image.value, roles))), \
             f"Number of image patches should be equal to the number of image tokens."
@@ -303,6 +307,8 @@ def get_args():
                        help='Disable multiprocessing')
     group.add_argument('--log_interval', type=int, default=100,
                        help='Interval between progress updates')
+    group.add_argument('--chat_start_token', type=str, default='<|im_start|>')
+    group.add_argument('--chat_end_token', type=str, default='<|im_end|>')
     group.add_argument('--vision_start_token', type=str, default='<vision>')
     group.add_argument('--vision_patch_token', type=str, default='<vpatch>')
     group.add_argument('--vision_row_sep_token', type=str, default='<vrow_sep>')
