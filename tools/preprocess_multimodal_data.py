@@ -118,9 +118,10 @@ class Encoder(object):
         Encoder.vision_row_sep_token = Encoder.tokenizer.vocab[self.args.vision_row_sep_token]
         Encoder.vision_frame_sep_token = Encoder.tokenizer.vocab[self.args.vision_frame_sep_token]
         Encoder.vision_end_token = Encoder.tokenizer.vocab[self.args.vision_end_token]
-
-        Encoder.chat_start_token = Encoder.tokenizer.vocab[self.args.chat_start_token]
-        Encoder.chat_end_token = Encoder.tokenizer.vocab[self.args.chat_end_token]
+        
+        if not self.args.do_pretrain:
+            Encoder.chat_start_token = Encoder.tokenizer.vocab[self.args.chat_start_token]
+            Encoder.chat_end_token = Encoder.tokenizer.vocab[self.args.chat_end_token]
 
     def encode(self, line: str) -> tuple[int, list[int], list[int], np.ndarray]:
         try:
