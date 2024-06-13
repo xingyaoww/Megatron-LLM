@@ -408,6 +408,7 @@ def instruction_collator(
     return_attention_mask_in_length: bool = False,
     loss_role: str = "assistant",
     no_loss_beyond_token_id: int = None,
+    no_loss_on_token_ids: list = [],
     vision_patch_size: int = 32,
 ):
     assert loss_role in ["assistant", "user", "all"]
@@ -513,6 +514,9 @@ def instruction_collator(
     if no_loss_beyond_token_id:
         no_loss_beyond_token_id = int(no_loss_beyond_token_id)
         loss_mask[input >= no_loss_beyond_token_id] = 0.0
+    if no_loss_on_token_ids:
+        for token_id in no_loss_on_token_ids:
+            loss_mask[input == token_id] = 0.0
 
     # - completely ignore padding tokens
     loss_mask[input == pad_id] = 0.0

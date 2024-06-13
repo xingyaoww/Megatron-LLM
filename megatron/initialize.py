@@ -147,7 +147,7 @@ def _initialize_distributed(args):
         backend=args.distributed_backend,
         world_size=args.world_size,
         rank=args.rank,
-        timeout=timedelta(minutes=10)
+        timeout=timedelta(minutes=30)
     )
 
     # Set the tensor model-parallel, pipeline model-parallel, and

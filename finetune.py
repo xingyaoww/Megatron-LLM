@@ -233,13 +233,19 @@ def forward_step(data_iterator, model):
 
         if not forward_step.first_batch_printed:
             print_rank_0("First batch:")
-            print_rank_0(f"tokens: {tokens[:, :30]}")
-            print_rank_0(f"labels: {labels[:, :30]}")
-            print_rank_0(f"loss_mask: {loss_mask[:, :30]}")
-            print_rank_0(f"attention_mask: {attention_mask[:, :30]}")
-            print_rank_0(f"position_ids: {position_ids[:, :30]}")
-            print_rank_0(f"vision_patch_indices: {vision_patch_indices[:, :30]}")
+            print_rank_0(f"===============================")
+            print_rank_0(f"tokens: {tokens[:, :]}")
+            print_rank_0(f"labels: {labels[:, :]}")
+            print_rank_0(f"loss_mask (sum): {loss_mask.sum()}")
+            print_rank_0(f"loss_mask: {loss_mask[:, :]}")
+            print_rank_0(f"attention_mask: {attention_mask[:, :]}")
+            print_rank_0(f"position_ids: {position_ids[:, :]}")
+            print_rank_0(f"vision_patch_indices: {vision_patch_indices[:, :]}")
             print_rank_0(f"vision_patches: {vision_patches}")
+            # print where loss_mask is not 0
+            print_rank_0(f"tokens M: {tokens[:, loss_mask[0] == 1]}")
+            print_rank_0(f"labels M: {labels[:, loss_mask[0] == 1]}")
+            print_rank_0(f"vision_patch_indices M: {vision_patch_indices[:, loss_mask[0] == 1]}")
             forward_step.first_batch_printed = True
 
         timers("batch-generator").stop()
@@ -272,6 +278,8 @@ def extra_args(parser):
     group.add_argument("--loss_role", choices={"assistant", "user", "all"},
                        default="assistant")
     group.add_argument("--no_loss_beyond_token_id", type=int, default=None)
+    group.add_argument("--no_loss_on_token_ids", type=str, default=None)
+
     group.add_argument("--data_type", choices={"gpt", "instruction", "multimodal_instruction"},
                        default="gpt")
     group.add_argument("--log_learning_rate_to_tensorboard", type=bool, default=True)
@@ -294,9 +302,12 @@ if __name__ == "__main__":
             return_attention_mask_in_length=return_attention_mask_in_length,
             loss_role=args.loss_role,
             no_loss_beyond_token_id=args.no_loss_beyond_token_id,
+            no_loss_on_token_ids=list(map(int, args.no_loss_on_token_ids.split(","))) if args.no_loss_on_token_ids else []
         )
         if args.no_loss_beyond_token_id:
             print_rank_0(f"Loss will not be calculated beyond token id {args.no_loss_beyond_token_id}")
+        if args.no_loss_on_token_ids:
+            print_rank_0(f"Loss will not be calculated for token id {args.no_loss_on_token_ids}")
         print_rank_0(f"Loss role set to {args.loss_role} for multimodal-instruction dataset")
         print_rank_0("NOTE: You can still use this for pre-training, as long as you set the loss role to 'assistant' for every token")
     else:
