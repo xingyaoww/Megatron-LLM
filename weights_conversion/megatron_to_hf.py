@@ -44,7 +44,7 @@ from transformers import (
 )
 
 # TODO: Replace this with a huggingface model
-from scripts.model.modeling_multimodal_mistral import MultimodalMistralForCausalLM
+from scripts.model.modeling_solo import SoloForCausalLM
 
 from utils.permute_qkv import permute_qkv
 
@@ -354,7 +354,7 @@ def write_mistral_model(
 
         print("Loading the checkpoint in a Llama model...")
         if multimodal:
-            model = MultimodalMistralForCausalLM.from_pretrained(
+            model = SoloForCausalLM.from_pretrained(
                 tmp_model_path,
                 torch_dtype=torch_dtype
             )
