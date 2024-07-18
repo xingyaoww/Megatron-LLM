@@ -97,7 +97,7 @@ def _load_checkpoint(queue, args):
     if args.model_type == 'GPT':
         from pretrain_gpt import model_provider
         margs.model_type = ModelType.encoder_or_decoder
-    elif args.model_type in {"falcon", "llama", "llama2", "codellama", "mistral"}:
+    elif args.model_type in {"falcon", "llama", "llama2", "codellama", "mistral", "multimodal_mistral"}:
         from finetune import model_provider
         margs.model_name = args.model_type
         margs.model_type = ModelType.encoder_or_decoder
@@ -112,16 +112,19 @@ def _load_checkpoint(queue, args):
 
     consumed_train_samples = None
     consumed_valid_samples = None
+    consumed_test_samples = None
 
     def _get_models(count, dtype, pre_process, post_process):
         nonlocal consumed_train_samples
         nonlocal consumed_valid_samples
+        nonlocal consumed_test_samples
         models = []
         for rank in range(count):
             mpu.set_tensor_model_parallel_rank(rank)
             model_ = [model_provider(pre_process, post_process).to(dtype)]
             margs.consumed_train_samples = 0
             margs.consumed_valid_samples = 0
+            margs.consumed_test_samples = 0
             load_checkpoint(model_, None, None)
             assert(len(model_) == 1)
             model_ = model_[0]
@@ -133,6 +136,10 @@ def _load_checkpoint(queue, args):
                 assert(margs.consumed_valid_samples == consumed_valid_samples)
             else:
                 consumed_valid_samples = margs.consumed_valid_samples
+            if consumed_test_samples is not None:
+                assert(margs.consumed_test_samples == consumed_test_samples)
+            else:
+                consumed_test_samples = margs.consumed_test_samples
             models.append(model_)
         return models
 
@@ -193,6 +200,7 @@ def _load_checkpoint(queue, args):
     md.tie_embed_logits = margs.tie_embed_logits
     md.params_dtype = margs.params_dtype
     md.sliding_window_size = margs.sliding_window_size
+    md.vision_patch_size = margs.vision_patch_size
     if margs.position_embedding_type == PositionEmbeddingType.absolute:
         md.position_embedding_type = "absolute"
     elif margs.position_embedding_type == PositionEmbeddingType.rotary:
@@ -208,6 +216,7 @@ def _load_checkpoint(queue, args):
 
     md.consumed_train_samples = consumed_train_samples
     md.consumed_valid_samples = consumed_valid_samples
+    md.consumed_test_samples = consumed_test_samples
     queue.put(md)
 
     def queue_put(name, msg):
@@ -237,6 +246,13 @@ def _load_checkpoint(queue, args):
 
         queue_put("lm_head", {"lm_head": torch.cat([models[tp_rank].language_model.lm_head.data
                                                     for tp_rank in range(tp_size)])})
+
+    if md.vision_patch_size is not None:
+        # pass along vision embed
+        queue_put("embed_vision_patch", {"embed_vision_patch": torch.cat([
+            models[tp_rank].language_model.embed_vision_patch.weight.data
+            for tp_rank in range(tp_size)
+        ])})
 
     total_layer_num = 0
     for pp_rank in range(pp_size):

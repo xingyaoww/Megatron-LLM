@@ -32,7 +32,19 @@ sys.path.append(str(Path(__file__).parent.parent.absolute()))  # megatron is imp
 
 import torch
 from tqdm.auto import trange
-from transformers import LlamaConfig, LlamaForCausalLM, LlamaTokenizerFast, FalconConfig, FalconForCausalLM, AutoTokenizer, MistralConfig, MistralForCausalLM
+from transformers import (
+    LlamaConfig,
+    LlamaForCausalLM,
+    LlamaTokenizerFast,
+    FalconConfig,
+    FalconForCausalLM,
+    AutoTokenizer,
+    MistralConfig,
+    MistralForCausalLM
+)
+
+# TODO: Replace this with a huggingface model
+from scripts.model.modeling_solo import SoloForCausalLM
 
 from utils.permute_qkv import permute_qkv
 
@@ -217,6 +229,7 @@ def write_mistral_model(
     norm_eps: float=1e-5,
     rope_theta: float=10000.0,
     vocab_size: int=None,
+    multimodal: bool=False,
 ):
 
     # Preliminaries
@@ -292,6 +305,8 @@ def write_mistral_model(
             "lm_head.weight": loaded['lm_head'],
             "model.embed_tokens.weight": loaded['embedding']["word_embeddings.weight"]
         }
+        if multimodal:
+            state_dict["model.embed_vision_patch.weight"] = loaded['embed_vision_patch']["weight"]
 
         for k, v in state_dict.items():
             index_dict["weight_map"][k] = filename
@@ -305,9 +320,15 @@ def write_mistral_model(
         write_json(index_dict, os.path.join(tmp_model_path, "pytorch_model.bin.index.json"))
 
         # load mistral config from huggingface
-        config = MistralConfig.from_pretrained(
-            "mistralai/Mistral-7B-v0.1"
-        )
+        if multimodal:
+            config = MistralConfig.from_pretrained(
+                # TODO: Replace this with a huggingface model
+                "data/models/raw_hf/MultimodalMistral-7B-distilled-proj"
+            )
+        else:
+            config = MistralConfig.from_pretrained(
+                "mistralai/Mistral-7B-v0.1"
+            )
         # assert configuration matches
         assert config.hidden_size == n_hidden
         assert config.intermediate_size == intermediate_size
@@ -332,10 +353,16 @@ def write_mistral_model(
             config.vocab_size = vocab_size
 
         print("Loading the checkpoint in a Llama model...")
-        model = MistralForCausalLM.from_pretrained(
-            tmp_model_path,
-            torch_dtype=torch_dtype
-        )
+        if multimodal:
+            model = SoloForCausalLM.from_pretrained(
+                tmp_model_path,
+                torch_dtype=torch_dtype
+            )
+        else:
+            model = MistralForCausalLM.from_pretrained(
+                tmp_model_path,
+                torch_dtype=torch_dtype
+            )
         model.config.vocab_size = vocab_size
         # resizes the embedding layer to the correct size
         model.resize_token_embeddings(vocab_size)
@@ -491,7 +518,7 @@ def write_falcon_model(
 
 
 def write_tokenizer(args: Namespace):
-    if args.model in {"llama", "llama2", "codellama", "mistral"}:
+    if args.model in {"llama", "llama2", "codellama", "mistral", "multimodal_mistral"}:
         # mistral also use LlamaTokenizerFast
         args.tokenizer_type = "SentencePieceTokenizer"
         if args.vocab_file:
@@ -507,6 +534,8 @@ def write_tokenizer(args: Namespace):
                 hf_repo_name = "TheBloke/CodeLlama-13B-fp16"
             elif args.model == "mistral":
                 hf_repo_name = "mistralai/Mistral-7B-v0.1"
+            elif args.model == "multimodal_mistral":
+                raise NotImplementedError("You need to provide the vocab file for multimodal mistral")
             else:
                 hf_repo_name = "meta-llama/Llama-2-7b-hf"
             try:  # try loading from huggingface
@@ -595,7 +624,7 @@ def main():
     parser.add_argument("--input_dir", help="Location of Megatron weights",
                         required=True)
     parser.add_argument("--num_output_shards", type=int, default=1)
-    parser.add_argument("--model", choices={"falcon", "llama", "llama2", "codellama", "mistral"},
+    parser.add_argument("--model", choices={"falcon", "llama", "llama2", "codellama", "mistral", "multimodal_mistral"},
                          default="llama2")
     parser.add_argument("--output_dir", help="Location to write HF model and tokenizer",
                         required=True)
@@ -624,12 +653,13 @@ def main():
             rope_theta=rope_theta,
             vocab_size=vocab_size,
         )
-    elif args.model == "mistral":
+    elif args.model == "mistral" or args.model == "multimodal_mistral":
         write_mistral_model(
             model_path=args.output_dir,
             input_base_path=args.input_dir,
             num_output_shards=args.num_output_shards,
             vocab_size=vocab_size,
+            multimodal=args.model == "multimodal_mistral"
         )
     elif args.model == "falcon":
         write_falcon_model(

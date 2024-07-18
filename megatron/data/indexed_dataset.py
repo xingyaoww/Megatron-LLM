@@ -98,7 +98,9 @@ dtypes = {
     5: np.int64,
     6: float,
     7: np.double,
-    8: np.uint16
+    8: np.uint16,
+    9: np.float32,
+    10: np.float16,
 }
 
 
@@ -154,7 +156,8 @@ class IndexedDataset(torch.utils.data.Dataset):
             self.doc_idx = read_longs(f, self.doc_count)
 
     def read_data(self, path):
-        self.data_file = open(data_file_path(path), 'rb', buffering=0)
+        data_path = data_file_path(path)
+        self.data_file = open(data_path, 'rb', buffering=0)
 
     def check_index(self, i):
         if i < 0 or i >= self._len:
@@ -470,7 +473,7 @@ class MMapIndexedDataset(torch.utils.data.Dataset):
         if not skip_warmup:
             print_rank_0("    warming up data mmap file...")
             _warmup_mmap_file(data_file_path(self._path))
-        print_rank_0("    creating numpy buffer of mmap...")
+        print_rank_0(f"    creating numpy buffer of mmap for {self._path}...")
         self._bin_buffer_mmap = np.memmap(data_file_path(self._path), mode='r', order='C')
         print_rank_0("    creating memory view of numpy buffer...")
         self._bin_buffer = memoryview(self._bin_buffer_mmap)

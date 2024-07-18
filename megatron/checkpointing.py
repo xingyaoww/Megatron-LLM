@@ -583,6 +583,7 @@ def load_args_from_checkpoint(args, load_arg='load'):
     _set_arg('make_vocab_size_divisible_by', force=True)
     _set_arg('train_iters')
     _set_arg('sliding_window_size')
+    _set_arg('vision_patch_size')
     if checkpoint_version < 3.0:
         _set_arg('tensor_model_parallel_size',
                  'model_parallel_size')
@@ -634,6 +635,7 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
     # Check arguments.
     assert args.consumed_train_samples == 0
     assert args.consumed_valid_samples == 0
+    assert args.consumed_test_samples == 0
     if 'args' in model_state_dict and not args.finetune:
         checkpoint_args = model_state_dict['args']
         check_checkpoint_args(checkpoint_args)
@@ -642,6 +644,8 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
         update_num_microbatches(consumed_samples=args.consumed_train_samples)
         args.consumed_valid_samples = getattr(checkpoint_args,
                                               'consumed_valid_samples', 0)
+        args.consumed_test_samples = getattr(checkpoint_args,
+                                              'consumed_test_samples', 0)
     else:
         print_rank_0('could not find arguments in the checkpoint ...')
 

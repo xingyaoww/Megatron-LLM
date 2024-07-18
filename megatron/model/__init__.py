@@ -12,3 +12,4 @@ from .mistral_model import MistralModel
 from .t5_model import T5Model
 from .module import Float16Module
 from .enums import ModelType
+from .multimodal_mistral_model import MultimodalMistralModel

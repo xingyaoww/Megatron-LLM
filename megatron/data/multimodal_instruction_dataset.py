@@ -15,22 +15,25 @@ from megatron.data.dataset_utils import (
     get_train_valid_test_split_,
     get_datasets_weights_and_num_samples
 )
+from megatron.data.instruction_dataset import Role
+
+# imported from megatron.data.instruction_dataset
+# class Role(IntEnum):
+#     system = 0
+#     user = 1
+#     assistant = 2
+#     image = 3
+#     PACK_SEP = 1000  # This is used to separate two conversations packed together in to one sample
 
 
-class Role(IntEnum):
-    system = 0
-    user = 1
-    assistant = 2
-    image = 3
-    PACK_SEP = 1000  # This is used to separate two conversations packed together in to one sample
-
-
-class InstructionDataset(Dataset):
+class MultimodalInstructionDataset(Dataset):
     def __init__(self, name: str, sample_indices: np.ndarray,
                  indexed_datasets: dict[str, Dataset], seq_length: int):
 
         self.indexed_text = indexed_datasets["text"]
         self.indexed_role = indexed_datasets["role"]
+        self.indexed_vision_patch_indices = indexed_datasets["vision_patch_indices"]
+        self.indexed_vison_patch = indexed_datasets["vision_patch"]
 
         # validate indices
         assert np.min(sample_indices) >= 0
@@ -49,8 +52,17 @@ class InstructionDataset(Dataset):
         idx = self.sample_indices[idx]
         text = self.indexed_text.get(idx)
         role = self.indexed_role.get(idx)
+        vision_patch_indices = self.indexed_vision_patch_indices.get(idx)
+        vision_patch = self.indexed_vison_patch.get(idx)
         assert text is not None and role is not None and text.shape == role.shape
-        return {"text": text.astype(np.int64), "role": role.astype(np.int64)}
+        assert vision_patch_indices is not None and vision_patch is not None
+        assert vision_patch_indices.shape == text.shape
+        return {
+            "text": text.astype(np.int64),
+            "role": role.astype(np.int64),
+            "vision_patch_indices": vision_patch_indices.astype(np.int64),
+            "vision_patch": vision_patch.astype(np.float32)
+        }
 
 
 def _build_dataset_kernel(
@@ -61,7 +73,7 @@ def _build_dataset_kernel(
     seq_length: int,
     seed: int,
     skip_warmup: bool,
-) -> InstructionDataset:
+) -> MultimodalInstructionDataset:
     """
     Build dataset. This method is called when individual
     train, valid, test datasets are provided
@@ -140,7 +152,13 @@ def get_indexed_datasets_(data_prefix: str, data_impl: str,
     start_time = time.time()
     indexed_text = make_dataset(f"{data_prefix}-text", data_impl, skip_warmup)
     indexed_role = make_dataset(f"{data_prefix}-role", data_impl, skip_warmup)
+    indexed_vision_patch = make_dataset(f"{data_prefix}-vision_patch", data_impl, skip_warmup)
+    indexed_vision_patch_indices = make_dataset(f"{data_prefix}-vision_patch_indices", data_impl, skip_warmup)
     assert indexed_text is not None
+    assert indexed_role is not None
+    assert indexed_vision_patch is not None
+    assert indexed_vision_patch_indices is not None
+
     print_rank_0(" > finished creating indexed dataset in "
                  f"{time.time() - start_time:4f} seconds")
     num_docs = len(indexed_text)
@@ -148,12 +166,17 @@ def get_indexed_datasets_(data_prefix: str, data_impl: str,
     indices = np.arange(start=0, stop=num_docs, step=1, dtype=np.int32)
     n_tokens = np.sum(indexed_text.sizes[indices])
     print_rank_0("    number of tokens: {}".format(n_tokens))
-    return {"text": indexed_text, "role": indexed_role}
+    n_patch_indices = np.sum(indexed_vision_patch_indices.sizes[indices])
+    print_rank_0("    number of vision patch indices (should be the same as # tokens): {}".format(n_patch_indices))
+    n_patches = np.sum(indexed_vision_patch.sizes[indices]) // (32 * 32 * 3)
+    print_rank_0("    number of vision patches: {}".format(n_patches))
+
+    return {"text": indexed_text, "role": indexed_role, "vision_patch": indexed_vision_patch, "vision_patch_indices": indexed_vision_patch_indices}
 
 
 def _sample_dataset(np_rng: np.random.RandomState, document_indices: np.ndarray,
                     indexed_datasets: dict[str, Dataset], name: str,
-                    num_samples: int, seq_length: int) -> Optional[InstructionDataset]:
+                    num_samples: int, seq_length: int) -> Optional[MultimodalInstructionDataset]:
     """Compute randomized index of samples for all epochs (num_samples)"""
     assert num_samples > 0
 
@@ -165,8 +188,9 @@ def _sample_dataset(np_rng: np.random.RandomState, document_indices: np.ndarray,
         remaining -= count
     sample_indices = np.concatenate(index_list)
 
-    dataset = InstructionDataset(name, sample_indices, indexed_datasets,
-                                 seq_length)
+    dataset = MultimodalInstructionDataset(
+        name, sample_indices, indexed_datasets, seq_length
+    )
     return dataset
 
 
@@ -281,6 +305,7 @@ def build_train_valid_test_datasets(data_prefix: Optional[str],
         )
         train_dataset, valid_dataset, test_dataset = None, None, None
         # Single dataset.
+        print_rank_0(" > train data path: {}".format(train_data_prefix))
         if train_data_prefix is not None:
             train_dataset = _build_dataset(
                 "train",
@@ -292,6 +317,7 @@ def build_train_valid_test_datasets(data_prefix: Optional[str],
                 skip_warmup,
             )
 
+        print_rank_0(" > valid data path: {}".format(valid_data_prefix))
         if valid_data_prefix is not None:
             valid_dataset = _build_dataset(
                 "valid",
@@ -300,9 +326,10 @@ def build_train_valid_test_datasets(data_prefix: Optional[str],
                 train_valid_test_num_samples[1],
                 seq_length,
                 seed,
-                False,
+                skip_warmup,
             )
 
+        print_rank_0(" > test data path: {}".format(test_data_prefix))
         if test_data_prefix is not None:
             test_dataset = _build_dataset(
                 "test",
@@ -311,7 +338,7 @@ def build_train_valid_test_datasets(data_prefix: Optional[str],
                 train_valid_test_num_samples[2],
                 seq_length,
                 seed,
-                False,
+                skip_warmup,
             )
         return train_dataset, valid_dataset, test_dataset
 
@@ -380,6 +407,9 @@ def instruction_collator(
     scalar_loss_mask=0.0,
     return_attention_mask_in_length: bool = False,
     loss_role: str = "assistant",
+    no_loss_beyond_token_id: int = None,
+    no_loss_on_token_ids: list = [],
+    vision_patch_size: int = 32,
 ):
     assert loss_role in ["assistant", "user", "all"]
     args = get_args()
@@ -394,9 +424,12 @@ def instruction_collator(
 
     # pad data to seq_len, create attention mask
     batch_size = len(data)
+    # INPUTS
     attention_mask = torch.ones((batch_size, seq_len), dtype=torch.long)
     role = torch.full_like(attention_mask, -1)
     input = torch.full_like(attention_mask, pad_id)
+    vision_patch_indices = torch.full_like(attention_mask, -1)
+    vision_patches = [] # list of vision patches (this is dynamic, so we can't use torch.full_like)
 
     # For loss and example segmentation
     # 1 means optimize loss, 0 means no loss
@@ -409,15 +442,43 @@ def instruction_collator(
     for i, x in enumerate(data):
         t = x["text"]
         r = x["role"]
+        # print(f"batch {i} text shape", t.shape)
+        # text shape (32723,)
+        cur_vision_patch_indices = x["vision_patch_indices"]
+        # vision_patch shape (59006976,)
+        cur_vision_patch = x["vision_patch"].reshape(
+            -1,
+            vision_patch_size * vision_patch_size * 3
+        )
+        # print("cur_vision_patch_indices shape", cur_vision_patch_indices.shape)
+
         l = len(t)
 
+        # Increment cur_vision_patch_indices by the number of vision patches already seen
+        # since we are appending vision patches to a list
+        cur_vision_patch_indices += len(vision_patches)
+        
+        # print("seq_len", seq_len)
+        # print("token len", l)
         if l < seq_len:
             attention_mask[i, l:] = 0
             input[i, :l] = torch.from_numpy(t)
             role[i, :l] = torch.from_numpy(r)
+            vision_patch_indices[i, :l] = torch.from_numpy(cur_vision_patch_indices)
         else:
             input[i] = torch.from_numpy(t[:seq_len])
             role[i] = torch.from_numpy(r[:seq_len])
+
+            vision_patch_indices[i] = torch.from_numpy(cur_vision_patch_indices[:seq_len])
+            # # find value in cur_vision_patch_indices[:seq_len] that are not -1
+            # # and use that to index into cur_vision_patch
+            # indices_non_0 = torch.where(cur_vision_patch_indices != -1)
+            # patch_indices_kept = cur_vision_patch_indices[indices_non_0]
+            # vision_patches.extend(cur_vision_patch[indices])
+            
+        # note: we just append everything for simplicity
+        # since the dataset are pre-packed, so it less likely to waste memory
+        vision_patches.extend(cur_vision_patch)
 
         # Segmentation for packed sequences
         current_example_id = 0
@@ -449,6 +510,13 @@ def instruction_collator(
     else:
         loss_role = Role[loss_role].value
         loss_mask[role == loss_role] = 1.0
+    
+    if no_loss_beyond_token_id:
+        no_loss_beyond_token_id = int(no_loss_beyond_token_id)
+        loss_mask[input >= no_loss_beyond_token_id] = 0.0
+    if no_loss_on_token_ids:
+        for token_id in no_loss_on_token_ids:
+            loss_mask[input == token_id] = 0.0
 
     # - completely ignore padding tokens
     loss_mask[input == pad_id] = 0.0
@@ -465,7 +533,20 @@ def instruction_collator(
     )
     # convert to torch.int64
     attention_mask = attention_mask.to(torch.int64)
-    loss_mask = loss_mask[:, :-1]
+
+    # labels = input[:, 1:].contiguous() therefore we need to shift the loss_mask similarly
+    loss_mask = loss_mask[:, 1:].contiguous()
+    vision_patch_indices = vision_patch_indices[:, :-1]
+    # aggregate vision patches
+    vision_patches = torch.tensor(np.array(vision_patches), dtype=torch.float32)
+    vision_patches = vision_patches.view(-1, vision_patch_size * vision_patch_size * 3)
+
+    # print("vision_patches shape", vision_patches.shape)
+    # print("vision_patch_indices shape", vision_patch_indices.shape)
+    # print("attention_mask shape", attention_mask.shape)
+    # print("position_ids shape", position_ids.shape)
+    # print("vision_patches", vision_patches)
+    # print("vision_patch_indices", vision_patch_indices)
     
     return {
         "text": input,
@@ -473,4 +554,6 @@ def instruction_collator(
             else attention_mask_in_length,
         "loss_mask": loss_mask,
         "position_ids": position_ids,
+        "vision_patch_indices": vision_patch_indices,
+        "vision_patches": vision_patches,
     }

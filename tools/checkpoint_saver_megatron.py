@@ -126,7 +126,8 @@ def save_checkpoint(queue, args):
         sys.argv += ["--no_tie_embed_logits"]
     if md.lima_dropout:
         sys.argv += ["--lima_dropout"]
-
+    if md.vision_patch_size:
+        sys.argv += ["--vision_patch_size", str(md.vision_patch_size)]
     if md.make_vocab_size_divisible_by is not None:
         sys.argv.extend(['--make_vocab_size_divisible_by', str(md.make_vocab_size_divisible_by)])
     if md.params_dtype == torch.float16:
@@ -142,8 +143,10 @@ def save_checkpoint(queue, args):
     if hasattr(md, 'consumed_train_samples'):
         margs.consumed_train_samples = md.consumed_train_samples
         margs.consumed_valid_samples = md.consumed_valid_samples
+        margs.consumed_test_samples = md.consumed_test_samples
         print(f"Setting consumed_train_samples to {margs.consumed_train_samples}"
-              f" and consumed_valid_samples to {margs.consumed_valid_samples}")
+              f" and consumed_valid_samples to {margs.consumed_valid_samples}"
+                f" and consumed_test_samples to {margs.consumed_test_samples}")
     else:
         print("consumed_train_samples not provided.")
 
@@ -154,7 +157,7 @@ def save_checkpoint(queue, args):
     elif md.model_type == 'BERT':
         from pretrain_bert import model_provider
         margs.model_type = ModelType.encoder_or_decoder
-    elif md.model_type in {'falcon', 'llama', 'llama2', 'codellama', 'mistral'}:
+    elif md.model_type in {'falcon', 'llama', 'llama2', 'codellama', 'mistral', 'multimodal_mistral'}:
         from finetune import model_provider
         margs.model_name = args.model_type
         margs.model_type = ModelType.encoder_or_decoder
@@ -253,6 +256,19 @@ def save_checkpoint(queue, args):
         for tp_rank, model in enumerate(models):
             print(f"lm_head shape {model.language_model.lm_head.shape}")
             model.language_model.lm_head.data.copy_(out_lm_head[tp_rank])
+
+    # Get vision embed, if available
+    if md.vision_patch_size is not None:
+        # pass along vision embed
+        embed_vision_patch = queue_get("embed_vision_patch").pop("embed_vision_patch")
+        out_embed_vision_patch = torch.chunk(
+            embed_vision_patch, args.target_tensor_parallel_size, dim=0
+        )
+        for tp_rank, model in enumerate(models):
+            print(f"embed_vision_patch shape {model.language_model.embed_vision_patch.weight.shape}")
+            print(f"out_embed_vision_patch shape {out_embed_vision_patch[tp_rank].shape}")
+            model.language_model.embed_vision_patch.weight.data.copy_(out_embed_vision_patch[tp_rank])
+
 
     # Transformer layers
     total_layer_num = 0

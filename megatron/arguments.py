@@ -173,6 +173,7 @@ def validate_args(args, defaults={}):
     # Consumed tokens.
     args.consumed_train_samples = 0
     args.consumed_valid_samples = 0
+    args.consumed_test_samples = 0
 
     # Support for variable sequence lengths across batches/microbatches.
     # set it if the dataloader supports generation of variable sequence lengths
@@ -478,6 +479,9 @@ def _add_network_size_args(parser):
     # Added for Mistral
     group.add_argument("--sliding_window_size", type=int, default=None,
                        help="Whether to use sliding window attention for Mistral. Default is None, which means no sliding window attention.")
+    # Added for MultimodalMistral
+    group.add_argument("--vision_patch_size", type=int, default=None,
+                       help="Size (in pixels) of the vision patch.")
     return parser
 
 
@@ -660,6 +664,8 @@ def _add_training_args(parser):
     group.add_argument('--exit_signal_handler', action='store_true',
                        help='Dynamically save the checkpoint and shutdown the '
                        'training if SIGTERM is received')
+    group.add_argument('--save_on_exception', action='store_true',
+                          help='Save the checkpoint if an exception is raised.')
     group.add_argument('--tensorboard_dir', type=str, default=None,
                        help='Write TensorBoard logs to this directory.')
     group.add_argument('--no_masked_softmax_fusion',
@@ -885,12 +891,17 @@ def _add_distributed_args(parser):
 
 def _add_validation_args(parser):
     group = parser.add_argument_group(title='validation')
-    group.add_argument('--eval_iters', type=int, default=100,
+    group.add_argument('--valid_iters', type=int, default=100,
                        help='Number of iterations to run for evaluation'
-                       'validation/test for.')
+                       'validation for.')
+    group.add_argument('--test_iters', type=int, default=100,
+                       help='Number of iterations to run for evaluation'
+                       'test for.')
     group.add_argument('--eval_interval', type=int, default=1000,
                        help='Interval between running evaluation on '
                        'validation set.')
+    group.add_argument('--eval_at_start', action='store_true',
+                       help='Run evaluation at the start of training.')
     return parser
 
 

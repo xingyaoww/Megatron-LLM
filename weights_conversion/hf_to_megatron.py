@@ -36,6 +36,7 @@ stored therein will not be removed when the conversion succeeds.
 
 import re
 import sys
+import math
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -183,7 +184,8 @@ def llama_to_megatron(weights: dict, size: int, source: str = "meta",
 
 def mistral_to_megatron(
     weights: dict,
-    size: int
+    size: int,
+    multimodal: bool = False
 ) -> dict:
     assert size == 7
     def permute(qkv_w):
@@ -251,8 +253,14 @@ def mistral_to_megatron(
         del weights[f"{hf_prefix}.self_attn.k_proj.weight"]
         del weights[f"{hf_prefix}.self_attn.v_proj.weight"]
 
-    return {"embedding": embedding, "transformer": transformer,
+    ret = {"embedding": embedding, "transformer": transformer,
             "lm_head": lm_head}
+    if multimodal:
+        embed_vision_patch = {
+            "weight": weights["model.embed_vision_patch.weight"]
+        }
+        ret["embed_vision_patch"] = embed_vision_patch
+    return ret
 
 
 def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
@@ -277,6 +285,24 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
                                                     trust_remote_code=True,
                                                     cache_dir=cache_dir)
         hf_weights = model.state_dict()
+    elif model_name == "multimodal_mistral":
+        # TODO: replace this with huggingface model
+        # model = AutoModelForCausalLM.from_pretrained(model_path,
+        #                                             trust_remote_code=True,
+        #                                             cache_dir=cache_dir)
+        # from scripts/model/modeling_multimodal_mistral.py
+        from scripts.model.modeling_solo import SoloForCausalLM
+        model = SoloForCausalLM.from_pretrained(model_path,
+                                                        trust_remote_code=True,
+                                                        cache_dir=cache_dir,
+                                                        ignore_mismatched_sizes=True)
+        # check vocab size
+        if model.config.vocab_size != 33029:
+            print(f"Vocab size is {model.config.vocab_size}, resizing to 33029")
+            # correct vocab size
+            model.resize_token_embeddings(33029)
+        assert model.config.vocab_size == 33029
+        hf_weights = model.state_dict()
     else:
         print("Getting llama...")
         version = 2 if "2" in model_name else 1
@@ -288,6 +314,8 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
         megatron_weights = falcon_to_megatron(hf_weights, size)
     elif model_name == "mistral":
         megatron_weights = mistral_to_megatron(hf_weights, size)
+    elif model_name == "multimodal_mistral":
+        megatron_weights = mistral_to_megatron(hf_weights, size, multimodal=True)
     else:
         megatron_weights = llama_to_megatron(hf_weights, size, llama_source,
                                              version=1 if model_name == "llama" else 2)
@@ -306,7 +334,7 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
                      "hidden_dropout": 0.0,
                      "parallel_attn": True, "max_position_embeddings": 2048,
                      "seq_length": 2048})
-    elif model_name == "mistral":
+    elif model_name == "mistral" or model_name == "multimodal_mistral":
         assert size == 7
         # mistral-7b mostly uses the same args as llama-7b
         # https://huggingface.co/mistralai/Mistral-7B-v0.1/blob/main/config.json
@@ -330,6 +358,10 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
             "rope_theta": 10000.0,
             "sliding_window_size": 4096,
         }
+        if model_name == "multimodal_mistral":
+            args["vision_patch_size"] = 32
+            # 32000 + 5 (reserved vision token) + 1024 (location tokens)
+            args["padded_vocab_size"] = math.ceil(33029 / 128) * 128
     else:  # llama1, llama2, codellama
         args = {"num_layers": llama_s2layer[size],
                 "hidden_size": llama_s2hidden[size],
@@ -398,7 +430,7 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
         vocab_file = tokenizer.vocab_file
         shutil.copy(vocab_file, token_path)
         print("Saved tokenizer.model in", token_path)
-    elif model_name == "mistral":
+    elif model_name == "mistral" or model_name == "multimodal_mistral":
         tokenizer = None
         if model_path is not None:
             try:
@@ -420,7 +452,7 @@ def main(model_name: str = "falcon", size: int = 7, out: Optional[Path] = None,
 if __name__ == "__main__":
     parser = ArgumentParser(description="Convert Huggingface llama or falcon weights to "
                                         "megatron-compatible weights")
-    parser.add_argument("model", choices={"falcon", "llama", "llama2", "codellama", "mistral"})
+    parser.add_argument("model", choices={"falcon", "llama", "llama2", "codellama", "mistral", "multimodal_mistral"})
     parser.add_argument("--size", default=7, choices={7, 13, 30, 34, 40, 65, 70}, type=int,
                         help="The size of the model")
     parser.add_argument("--out", type=Path,
@@ -440,7 +472,7 @@ if __name__ == "__main__":
         assert args.size in {7, 13, 30, 65}
     elif args.model == "codellama":
         assert args.size in {7, 13, 34}
-    elif args.model == "mistral":
+    elif args.model == "mistral" or args.model == "multimodal_mistral":
         assert args.size in {7}
     else:
         assert args.size in {7, 13, 70}
